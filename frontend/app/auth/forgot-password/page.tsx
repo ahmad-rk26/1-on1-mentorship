@@ -135,7 +135,7 @@ export default function ForgotPasswordPage() {
                     </Link>
                 </p>
             </div>
-            <Footer minimal />
+            <Footer />
         </div>
     );
 }
