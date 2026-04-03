@@ -169,7 +169,7 @@ export default function SignupPage() {
                     </Link>
                 </p>
             </div>
-            <Footer minimal />
+            <Footer />
         </div>
     );
 }

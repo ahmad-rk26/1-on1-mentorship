@@ -241,7 +241,7 @@ export default function ResetPasswordPage() {
                     </p>
                 )}
             </div>
-            <Footer minimal />
+            <Footer />
         </div>
     );
 }
