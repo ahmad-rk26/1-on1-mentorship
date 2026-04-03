@@ -30,11 +30,10 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files
 .env
-.env.local
 .env*.local
-# .env.production is intentionally NOT ignored — safe to commit (only NEXT_PUBLIC_ vars)
+.env.production.local
 
 # vercel
 .vercel
