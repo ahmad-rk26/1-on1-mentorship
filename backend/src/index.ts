@@ -12,15 +12,33 @@ dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
+
+// Allow both local dev and deployed frontend simultaneously
+const allowedOrigins = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : []),
+];
+
+const corsOptions = {
+    origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
+        // Allow requests with no origin (e.g. curl, Postman, server-to-server)
+        if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+        cb(new Error(`CORS blocked: ${origin}`));
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+};
+
 const io = new Server(server, {
     cors: {
-        origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+        origin: allowedOrigins,
         methods: ['GET', 'POST'],
         credentials: true,
     },
 });
 
-app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000', credentials: true }));
+app.use(cors(corsOptions));
 app.use(express.json());
 
 app.use('/api/sessions', sessionRoutes);
