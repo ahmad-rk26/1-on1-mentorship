@@ -16,7 +16,7 @@ const server = http.createServer(app);
 // Allow both local dev and deployed frontend simultaneously
 const allowedOrigins = [
     'http://localhost:3000',
-    'http://localhost:3001',
+    'https://1-on1-mentorship.vercel.app',
     ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : []),
 ];
 

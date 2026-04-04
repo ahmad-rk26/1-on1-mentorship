@@ -15,13 +15,16 @@ export default function ForgotPasswordPage() {
         setError('');
         setLoading(true);
         try {
-            const { error } = await supabase.auth.resetPasswordForEmail(email, {
+            // Always call resetPasswordForEmail — Supabase intentionally doesn't
+            // reveal whether an email exists (security best practice).
+            // We always show the success screen regardless.
+            await supabase.auth.resetPasswordForEmail(email, {
                 redirectTo: `${window.location.origin}/auth/reset-password`,
             });
-            if (error) throw error;
             setSent(true);
-        } catch (err: any) {
-            setError(err.message);
+        } catch {
+            // Still show success to avoid email enumeration
+            setSent(true);
         } finally {
             setLoading(false);
         }

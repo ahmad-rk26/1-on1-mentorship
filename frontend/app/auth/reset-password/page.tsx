@@ -15,16 +15,19 @@ export default function ResetPasswordPage() {
     const [showPw, setShowPw] = useState(false);
     const [showCf, setShowCf] = useState(false);
     const [ready, setReady] = useState(false);
+    const [checking, setChecking] = useState(true); // prevents flicker on load
 
     // Supabase sends the user back with a session via the URL hash.
     // We need to wait for onAuthStateChange to pick up the RECOVERY event.
     useEffect(() => {
         const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
-            if (event === 'PASSWORD_RECOVERY') setReady(true);
+            if (event === 'PASSWORD_RECOVERY') { setReady(true); setChecking(false); }
         });
         // Also check if already in a session (user refreshed the page)
         supabase.auth.getSession().then(({ data }) => {
-            if (data.session) setReady(true);
+            if (data.session) { setReady(true); }
+            // Give onAuthStateChange 1.5s to fire before showing invalid state
+            setTimeout(() => setChecking(false), 1500);
         });
         return () => subscription.unsubscribe();
     }, []);
@@ -47,10 +50,14 @@ export default function ResetPasswordPage() {
             const { error } = await supabase.auth.updateUser({ password });
             if (error) throw error;
             setDone(true);
-            // Auto-redirect to dashboard after 2.5s
             setTimeout(() => router.push('/dashboard'), 2500);
         } catch (err: any) {
-            setError(err.message);
+            const msg: string = err.message ?? '';
+            if (msg.toLowerCase().includes('same password') || msg.toLowerCase().includes('different password')) {
+                setError('New password must be different from your current password.');
+            } else {
+                setError(msg || 'Something went wrong. Please try again.');
+            }
         } finally {
             setLoading(false);
         }
@@ -89,6 +96,15 @@ export default function ResetPasswordPage() {
                                 <div className="h-full rounded-full bg-emerald-500 animate-[shrink_2.5s_linear_forwards]"
                                     style={{ width: '100%', animation: 'progress 2.5s linear forwards' }} />
                             </div>
+                        </div>
+                    ) : checking ? (
+                        /* ── Checking link validity ── */
+                        <div className="flex flex-col items-center justify-center py-10 gap-4">
+                            <svg className="animate-spin w-8 h-8 text-violet-400" viewBox="0 0 24 24" fill="none">
+                                <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.25" />
+                                <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+                            </svg>
+                            <p className="text-[13px]" style={{ color: 'var(--muted)' }}>Verifying reset link...</p>
                         </div>
                     ) : !ready ? (
                         /* ── Invalid / expired link ── */
