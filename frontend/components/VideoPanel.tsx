@@ -70,6 +70,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     const [pip, setPip] = useState({ right: 16, bottom: 80 });
     const dragRef = useRef({ active: false, startX: 0, startY: 0, startR: 0, startB: 0 });
 
+    const remoteStreamRef = useRef<MediaStream | null>(null);
+
     const toast = useCallback((msg: string, type: Toast['type'] = 'info') => {
         const id = ++toastId.current;
         setToasts(p => [...p, { id, msg, type }]);
@@ -81,6 +83,21 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         if (hideTimer.current) clearTimeout(hideTimer.current);
         hideTimer.current = setTimeout(() => setShowCtrl(false), 4000);
     }, []);
+
+    // ── Apply remote stream when video element mounts ─────────────────────
+    useEffect(() => {
+        if (remoteOn && remoteRef.current && remoteStreamRef.current) {
+            remoteRef.current.srcObject = remoteStreamRef.current;
+            remoteRef.current.play().catch(() => { });
+        }
+    }, [remoteOn]);
+
+    // ── Apply local stream when video element mounts ───────────────────────
+    useEffect(() => {
+        if (phase === 'call' && localRef.current && streamRef.current) {
+            localRef.current.srcObject = streamRef.current;
+        }
+    }, [phase]);
 
     // ── Lobby preview stream ──────────────────────────────────────────────
     useEffect(() => {
@@ -230,8 +247,14 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             }
         };
         pc.ontrack = e => {
-            if (remoteRef.current) { remoteRef.current.srcObject = e.streams[0]; remoteRef.current.play().catch(() => { }); }
-            setRemoteOn(true); setStatus('connected');
+            const stream = e.streams[0];
+            remoteStreamRef.current = stream;
+            if (remoteRef.current) {
+                remoteRef.current.srcObject = stream;
+                remoteRef.current.play().catch(() => { });
+            }
+            setRemoteOn(true);
+            setStatus('connected');
         };
         if (streamRef.current) streamRef.current.getTracks().forEach(t => pc.addTrack(t, streamRef.current!));
         return pc;
@@ -247,6 +270,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     function stopMedia() {
         streamRef.current?.getTracks().forEach(t => t.stop());
         screenTrackRef.current?.stop(); screenTrackRef.current = null;
+        remoteStreamRef.current = null;
         if (localRef.current) localRef.current.srcObject = null;
         if (remoteRef.current) remoteRef.current.srcObject = null;
         if (previewRef.current) previewRef.current.srcObject = null;
@@ -254,11 +278,13 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     }
 
     function stopScreenShare() {
-        screenTrackRef.current?.stop(); screenTrackRef.current = null;
+        screenTrackRef.current?.stop();
+        screenTrackRef.current = null;
+        // Revert video sender back to camera track
         const camTrack = streamRef.current?.getVideoTracks()[0];
-        if (camTrack && pcRef.current) {
-            const sender = pcRef.current.getSenders().find(s => s.track?.kind === 'video');
-            if (sender) sender.replaceTrack(camTrack);
+        if (pcRef.current) {
+            const videoSender = pcRef.current.getSenders().find(s => s.track?.kind === 'video' || s.track === null);
+            if (videoSender && camTrack) videoSender.replaceTrack(camTrack);
         }
         setScreenSharing(false);
     }
@@ -279,13 +305,20 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     async function joinCall() {
         lobbyStream?.getTracks().forEach(t => t.stop());
         setLobbyStream(null);
-        setMicOn(permissions.mic ? lobbyMic : false);
-        setCamOn(permissions.cam ? lobbyCam : false);
+        setMicOn(lobbyMic);
+        setCamOn(lobbyCam);
         try {
+            // Always request both — then disable tracks based on settings
+            // This ensures senders exist in the peer connection for both audio and video
             const stream = await navigator.mediaDevices.getUserMedia({
-                video: (permissions.cam && lobbyCam) ? { width: { ideal: 1280 }, height: { ideal: 720 } } : false,
-                audio: (permissions.mic && lobbyMic) ? { echoCancellation: true, noiseSuppression: true } : false,
+                video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
             });
+
+            // Apply lobby toggle states
+            stream.getAudioTracks().forEach(t => { t.enabled = lobbyMic && permissions.mic; });
+            stream.getVideoTracks().forEach(t => { t.enabled = lobbyCam && permissions.cam; });
+
             streamRef.current = stream;
             if (localRef.current) localRef.current.srcObject = stream;
             iceBufRef.current = []; remoteSetRef.current = false;
@@ -319,16 +352,25 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         if (!permissions.screen && user.role !== 'mentor') { toast('🖥️ Host has not allowed screen sharing', 'warn'); return; }
         if (screenSharing) { stopScreenShare(); return; }
         try {
-            const screen = await (navigator.mediaDevices as any).getDisplayMedia({ video: true });
+            const screen = await (navigator.mediaDevices as any).getDisplayMedia({ video: true, audio: false });
             const track: MediaStreamTrack = screen.getVideoTracks()[0];
             screenTrackRef.current = track;
             if (pcRef.current) {
-                const sender = pcRef.current.getSenders().find(s => s.track?.kind === 'video');
-                if (sender) await sender.replaceTrack(track);
+                const senders = pcRef.current.getSenders();
+                const videoSender = senders.find(s => s.track?.kind === 'video');
+                if (videoSender) {
+                    await videoSender.replaceTrack(track);
+                } else {
+                    // No video sender yet — add the track
+                    pcRef.current.addTrack(track, screen);
+                }
             }
             track.onended = () => stopScreenShare();
-            setScreenSharing(true); toast('📺 Screen sharing started');
-        } catch { toast('Screen share cancelled', 'warn'); }
+            setScreenSharing(true);
+            toast('📺 Screen sharing started');
+        } catch (err: any) {
+            if (err.name !== 'NotAllowedError') toast('Screen share failed', 'warn');
+        }
     }
     function toggleFullscreen() {
         if (!document.fullscreenElement) { containerRef.current?.requestFullscreen(); setFullscreen(true); }
@@ -492,7 +534,10 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
             {/* Main video */}
             <div className="relative flex-1 flex items-center justify-center overflow-hidden">
-                {remoteOn ? <video ref={remoteRef} autoPlay playsInline className="w-full h-full object-cover" /> : (
+                {/* Remote video — always mounted so ref is always available */}
+                <video ref={remoteRef} autoPlay playsInline className="w-full h-full object-cover"
+                    style={{ display: remoteOn ? 'block' : 'none' }} />
+                {!remoteOn && (
                     <div className="flex flex-col items-center gap-4">
                         <div className="w-28 h-28 rounded-full flex items-center justify-center text-5xl font-black"
                             style={{ background: peerRole === 'mentor' ? 'linear-gradient(135deg,#7c3aed,#4f46e5)' : 'linear-gradient(135deg,#0891b2,#0e7490)', boxShadow: '0 0 60px rgba(124,58,237,0.3)' }}>{peerInitial}</div>
