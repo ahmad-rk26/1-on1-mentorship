@@ -397,17 +397,7 @@ export default function SessionPage() {
                 {/* Center — view tabs */}
                 <div className="flex items-center gap-1">
                     {([{ key: 'editor', label: 'Editor' }, { key: 'video', label: 'Video' }] as const).map(tab => (
-                        <button key={tab.key} onClick={() => {
-                            setActiveTab(tab.key);
-                            if (tab.key === 'video' && user.role === 'mentor') {
-                                socketRef.current?.emit('mentor-in-call', { sessionId: id });
-                                setMentorInCall(true);
-                            }
-                            if (tab.key === 'editor' && user.role === 'mentor') {
-                                socketRef.current?.emit('mentor-left-call', { sessionId: id });
-                                setMentorInCall(false);
-                            }
-                        }}
+                        <button key={tab.key} onClick={() => setActiveTab(tab.key)}
                             className="px-3 py-1 rounded text-[12px] font-medium transition-all"
                             style={{ background: activeTab === tab.key ? 'rgba(124,58,237,0.2)' : 'transparent', color: activeTab === tab.key ? '#a78bfa' : '#7d8590', border: activeTab === tab.key ? '1px solid rgba(124,58,237,0.35)' : '1px solid transparent' }}>
                             {tab.label}
@@ -574,15 +564,8 @@ export default function SessionPage() {
                                 peerName={peerInfo.name || (user.role === 'mentor' ? session.student_name : session.mentor_name) || ''}
                                 peerRole={peerInfo.role || (user.role === 'mentor' ? 'student' : 'mentor')}
                                 sessionTitle={session.title}
-                                onLeave={() => {
-                                    if (user.role === 'mentor') {
-                                        socketRef.current?.emit('mentor-left-call', { sessionId: id });
-                                        setMentorInCall(false);
-                                    }
-                                    setActiveTab('editor');
-                                }}
+                                onLeave={() => setActiveTab('editor')}
                                 onEndSession={handleEndSession}
-                                mentorInCall={mentorInCall}
                             />
                         )
                     )}
