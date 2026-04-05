@@ -119,22 +119,55 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         if (phase !== 'call') return;
         resetHide();
 
+        // Buffer ICE candidates that arrive before remote description is set
+        const iceCandidateBuffer: RTCIceCandidateInit[] = [];
+        let remoteDescSet = false;
+
+        async function flushCandidates(pc: RTCPeerConnection) {
+            for (const c of iceCandidateBuffer) {
+                try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { }
+            }
+            iceCandidateBuffer.length = 0;
+        }
+
         socket.on('webrtc-offer', async ({ offer }: { offer: RTCSessionDescriptionInit }) => {
             const pc = await ensurePC();
             await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            remoteDescSet = true;
+            await flushCandidates(pc);
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             socket.emit('webrtc-answer', { sessionId, answer });
         });
+
         socket.on('webrtc-answer', async ({ answer }: { answer: RTCSessionDescriptionInit }) => {
-            await pcRef.current?.setRemoteDescription(new RTCSessionDescription(answer));
+            if (!pcRef.current) return;
+            await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+            remoteDescSet = true;
+            await flushCandidates(pcRef.current);
         });
+
         socket.on('webrtc-ice-candidate', async ({ candidate }: { candidate: RTCIceCandidateInit }) => {
-            try { await pcRef.current?.addIceCandidate(new RTCIceCandidate(candidate)); } catch { }
+            if (!remoteDescSet || !pcRef.current) {
+                iceCandidateBuffer.push(candidate);
+                return;
+            }
+            try { await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate)); } catch { }
         });
+
         socket.on('peer-ready', async () => {
-            if (user.role === 'mentor' && pcRef.current && streamRef.current) await makeOffer();
+            if (user.role !== 'mentor') return;
+            // Ensure PC exists and stream is attached before making offer
+            const pc = await ensurePC();
+            if (streamRef.current) {
+                const senders = pc.getSenders();
+                if (senders.length === 0) {
+                    streamRef.current.getTracks().forEach(t => pc.addTrack(t, streamRef.current!));
+                }
+            }
+            await makeOffer();
         });
+
         socket.on('hand-raised', ({ name }: { name: string }) => {
             setPeerHandUp(true);
             toast(`✋ ${name} raised their hand`, 'info');
@@ -202,9 +235,22 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
                 { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' },
-                { urls: 'stun:stun3.l.google.com:19302' },
-                { urls: 'stun:stun4.l.google.com:19302' },
+                // Free TURN servers for NAT traversal (different networks)
+                {
+                    urls: 'turn:openrelay.metered.ca:80',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject',
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject',
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject',
+                },
             ],
             iceCandidatePoolSize: 10,
         });
