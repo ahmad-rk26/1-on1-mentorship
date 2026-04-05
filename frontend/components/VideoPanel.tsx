@@ -12,13 +12,14 @@ interface Props {
     sessionTitle: string;
     onLeave: () => void;
     onEndSession?: () => void;
+    mentorInCall?: boolean;
 }
 
 interface Toast { id: number; msg: string; type: 'info' | 'warn'; }
 interface Participant { id: string; name: string; role: string; micOn: boolean; handRaised: boolean; }
 
 
-export default function VideoPanel({ sessionId, socket, user, peerName, peerRole, sessionTitle, onLeave, onEndSession }: Props) {
+export default function VideoPanel({ sessionId, socket, user, peerName, peerRole, sessionTitle, onLeave, onEndSession, mentorInCall = true }: Props) {
     const remoteRef = useRef<HTMLVideoElement>(null);
     const localRef = useRef<HTMLVideoElement>(null);
     const previewRef = useRef<HTMLVideoElement>(null);
@@ -114,27 +115,23 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         };
     }, [socket, lobbyStream]);
 
-    // ── Call: socket events ───────────────────────────────────────────────
-    useEffect(() => {
-        if (phase !== 'call') return;
-        resetHide();
+    // ── WebRTC signaling — registered once on mount, ref-based (no race condition) ──
+    const iceBufRef = useRef<RTCIceCandidateInit[]>([]);
+    const remoteSetRef = useRef(false);
 
-        // Buffer ICE candidates that arrive before remote description is set
-        const iceCandidateBuffer: RTCIceCandidateInit[] = [];
-        let remoteDescSet = false;
-
-        async function flushCandidates(pc: RTCPeerConnection) {
-            for (const c of iceCandidateBuffer) {
-                try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { }
-            }
-            iceCandidateBuffer.length = 0;
+    async function flushICE(pc: RTCPeerConnection) {
+        for (const c of iceBufRef.current) {
+            try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { }
         }
+        iceBufRef.current = [];
+    }
 
+    useEffect(() => {
         socket.on('webrtc-offer', async ({ offer }: { offer: RTCSessionDescriptionInit }) => {
             const pc = await ensurePC();
             await pc.setRemoteDescription(new RTCSessionDescription(offer));
-            remoteDescSet = true;
-            await flushCandidates(pc);
+            remoteSetRef.current = true;
+            await flushICE(pc);
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             socket.emit('webrtc-answer', { sessionId, answer });
@@ -143,13 +140,13 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         socket.on('webrtc-answer', async ({ answer }: { answer: RTCSessionDescriptionInit }) => {
             if (!pcRef.current) return;
             await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
-            remoteDescSet = true;
-            await flushCandidates(pcRef.current);
+            remoteSetRef.current = true;
+            await flushICE(pcRef.current);
         });
 
         socket.on('webrtc-ice-candidate', async ({ candidate }: { candidate: RTCIceCandidateInit }) => {
-            if (!remoteDescSet || !pcRef.current) {
-                iceCandidateBuffer.push(candidate);
+            if (!remoteSetRef.current || !pcRef.current) {
+                iceBufRef.current.push(candidate);
                 return;
             }
             try { await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate)); } catch { }
@@ -157,13 +154,9 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
         socket.on('peer-ready', async () => {
             if (user.role !== 'mentor') return;
-            // Ensure PC exists and stream is attached before making offer
             const pc = await ensurePC();
-            if (streamRef.current) {
-                const senders = pc.getSenders();
-                if (senders.length === 0) {
-                    streamRef.current.getTracks().forEach(t => pc.addTrack(t, streamRef.current!));
-                }
+            if (streamRef.current && pc.getSenders().length === 0) {
+                streamRef.current.getTracks().forEach(t => pc.addTrack(t, streamRef.current!));
             }
             await makeOffer();
         });
@@ -184,19 +177,28 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             setTimeout(() => { stopMedia(); onLeave(); }, 1500);
         });
 
-        // Timer
-        timerRef.current = setInterval(() => setElapsed(e => e + 1), 1000);
-
         return () => {
-            socket.off('webrtc-offer'); socket.off('webrtc-answer');
-            socket.off('webrtc-ice-candidate'); socket.off('peer-ready');
-            socket.off('hand-raised'); socket.off('hand-lowered');
-            socket.off('host-mute-me'); socket.off('host-remove-me');
-            socket.off('session-ended');
+            socket.off('webrtc-offer');
+            socket.off('webrtc-answer');
+            socket.off('webrtc-ice-candidate');
+            socket.off('peer-ready');
+            socket.off('hand-raised');
+            socket.off('hand-lowered');
+            socket.off('host-mute-me');
+            socket.off('host-remove-me');
+        };
+    }, [socket, sessionId]);
+
+    // ── Call phase: start timer + auto-hide ───────────────────────────────
+    useEffect(() => {
+        if (phase !== 'call') return;
+        resetHide();
+        timerRef.current = setInterval(() => setElapsed(e => e + 1), 1000);
+        return () => {
             if (hideTimer.current) clearTimeout(hideTimer.current);
             if (timerRef.current) clearInterval(timerRef.current);
         };
-    }, [phase, sessionId, socket]);
+    }, [phase]);
 
     // ── Join call from lobby ──────────────────────────────────────────────
     async function joinCall() {
@@ -210,12 +212,12 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 audio: lobbyMic ? { echoCancellation: true, noiseSuppression: true } : false,
             });
             streamRef.current = stream;
-            // Set phase AFTER stream is ready so socket listeners are active
-            setPhase('call');
-            // Small delay to let useEffect re-run with phase='call' and register socket listeners
-            await new Promise(r => setTimeout(r, 100));
             if (localRef.current) localRef.current.srcObject = stream;
+            // Reset ICE buffer for new call
+            iceBufRef.current = [];
+            remoteSetRef.current = false;
             await ensurePC();
+            setPhase('call');
             if (user.role === 'mentor') {
                 await makeOffer();
             } else {
@@ -423,6 +425,33 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 className="px-6 py-2.5 rounded-xl font-semibold text-[14px] text-white transition-all hover:scale-105"
                 style={{ background: 'linear-gradient(135deg,#7c3aed,#4f46e5)' }}>
                 Back to Editor
+            </button>
+        </div>
+    );
+
+    // ── STUDENT WAITING — mentor hasn't started the call yet ─────────────
+    if (user.role === 'student' && !mentorInCall) return (
+        <div className="flex flex-col items-center justify-center h-full gap-5" style={{ background: '#111827' }}>
+            <div className="w-16 h-16 rounded-full flex items-center justify-center"
+                style={{ background: 'rgba(124,58,237,0.15)', border: '1px solid rgba(124,58,237,0.3)' }}>
+                <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                    <circle cx="14" cy="14" r="12" stroke="#a78bfa" strokeWidth="1.8" strokeOpacity="0.4" />
+                    <path d="M14 8v6l4 2" stroke="#a78bfa" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+            </div>
+            <div className="text-center">
+                <h3 className="text-white text-lg font-semibold mb-1">Waiting for mentor</h3>
+                <p className="text-white/40 text-[13px]">The mentor hasn't started the video call yet.</p>
+                <p className="text-white/30 text-[12px] mt-1">You'll be able to join once they open the call.</p>
+            </div>
+            <div className="flex gap-1.5 mt-2">
+                {[0, 1, 2].map(i => (
+                    <div key={i} className="w-2 h-2 rounded-full bg-violet-400/50 animate-bounce"
+                        style={{ animationDelay: `${i * 0.2}s` }} />
+                ))}
+            </div>
+            <button onClick={onLeave} className="mt-2 text-[13px] text-white/30 hover:text-white/60 transition-colors">
+                ← Back to editor
             </button>
         </div>
     );

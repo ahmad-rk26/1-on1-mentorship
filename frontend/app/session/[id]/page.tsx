@@ -107,6 +107,7 @@ export default function SessionPage() {
     const [sessionEnded, setSessionEnded] = useState(false);
     const [copied, setCopied] = useState(false);
     const [peerInfo, setPeerInfo] = useState<{ name: string; role: string }>({ name: '', role: '' });
+    const [mentorInCall, setMentorInCall] = useState(false);
 
     // ── File system state ─────────────────────────────────────────────────
     const [tree, setTree] = useState<FileNode[]>([]);
@@ -226,12 +227,15 @@ export default function SessionPage() {
             });
             socket.on('user-left', () => { setPeerJoined(false); setPeerInfo({ name: '', role: '' }); });
             socket.on('session-ended', () => setSessionEnded(true));
+            socket.on('mentor-in-call', () => setMentorInCall(true));
+            socket.on('mentor-left-call', () => setMentorInCall(false));
         }
         init();
         return () => {
             mounted = false;
             ['fs-tree', 'fs-file-update', 'fs-create', 'fs-rename', 'fs-delete', 'fs-open-file',
-                'new-message', 'user-joined', 'user-left', 'session-ended'].forEach(e => socketRef.current?.off(e));
+                'new-message', 'user-joined', 'user-left', 'session-ended',
+                'mentor-in-call', 'mentor-left-call'].forEach(e => socketRef.current?.off(e));
             disconnectSocket();
         };
     }, [id, router]);
@@ -393,7 +397,17 @@ export default function SessionPage() {
                 {/* Center — view tabs */}
                 <div className="flex items-center gap-1">
                     {([{ key: 'editor', label: 'Editor' }, { key: 'video', label: 'Video' }] as const).map(tab => (
-                        <button key={tab.key} onClick={() => setActiveTab(tab.key)}
+                        <button key={tab.key} onClick={() => {
+                            setActiveTab(tab.key);
+                            if (tab.key === 'video' && user.role === 'mentor') {
+                                socketRef.current?.emit('mentor-in-call', { sessionId: id });
+                                setMentorInCall(true);
+                            }
+                            if (tab.key === 'editor' && user.role === 'mentor') {
+                                socketRef.current?.emit('mentor-left-call', { sessionId: id });
+                                setMentorInCall(false);
+                            }
+                        }}
                             className="px-3 py-1 rounded text-[12px] font-medium transition-all"
                             style={{ background: activeTab === tab.key ? 'rgba(124,58,237,0.2)' : 'transparent', color: activeTab === tab.key ? '#a78bfa' : '#7d8590', border: activeTab === tab.key ? '1px solid rgba(124,58,237,0.35)' : '1px solid transparent' }}>
                             {tab.label}
@@ -560,8 +574,15 @@ export default function SessionPage() {
                                 peerName={peerInfo.name || (user.role === 'mentor' ? session.student_name : session.mentor_name) || ''}
                                 peerRole={peerInfo.role || (user.role === 'mentor' ? 'student' : 'mentor')}
                                 sessionTitle={session.title}
-                                onLeave={() => setActiveTab('editor')}
+                                onLeave={() => {
+                                    if (user.role === 'mentor') {
+                                        socketRef.current?.emit('mentor-left-call', { sessionId: id });
+                                        setMentorInCall(false);
+                                    }
+                                    setActiveTab('editor');
+                                }}
                                 onEndSession={handleEndSession}
+                                mentorInCall={mentorInCall}
                             />
                         )
                     )}

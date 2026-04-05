@@ -38,6 +38,18 @@ export function setupSocket(io: Server) {
             socket.emit('session-joined', { userId: user.id, name: user.name, role: user.role });
         });
 
+        // Mentor signals they entered the video call
+        socket.on('mentor-in-call', ({ sessionId }: { sessionId: string }) => {
+            if (user.role !== 'mentor') return;
+            socket.to(sessionId).emit('mentor-in-call');
+        });
+
+        // Mentor signals they left the video call
+        socket.on('mentor-left-call', ({ sessionId }: { sessionId: string }) => {
+            if (user.role !== 'mentor') return;
+            socket.to(sessionId).emit('mentor-left-call');
+        });
+
         // ── Code sync ──────────────────────────────────────────────────────
         socket.on('code-change', ({ sessionId, code, language }: { sessionId: string; code: string; language: string }) => {
             socket.to(sessionId).emit('code-update', { code, language, from: user.id });
