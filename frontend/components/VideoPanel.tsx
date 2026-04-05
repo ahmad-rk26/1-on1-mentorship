@@ -17,13 +17,6 @@ interface Props {
 interface Toast { id: number; msg: string; type: 'info' | 'warn'; }
 interface Participant { id: string; name: string; role: string; micOn: boolean; handRaised: boolean; }
 
-const ICE = {
-    iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-    ],
-};
 
 export default function VideoPanel({ sessionId, socket, user, peerName, peerRole, sessionTitle, onLeave, onEndSession }: Props) {
     const remoteRef = useRef<HTMLVideoElement>(null);
@@ -84,24 +77,31 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
     // ── Lobby: start preview stream ───────────────────────────────────────
     useEffect(() => {
+        let stream: MediaStream | null = null;
         navigator.mediaDevices.getUserMedia({ video: true, audio: true })
             .then(s => {
+                stream = s;
                 setLobbyStream(s);
                 if (previewRef.current) previewRef.current.srcObject = s;
             })
             .catch(() => setError('Camera/mic permission denied.'));
-        return () => { lobbyStream?.getTracks().forEach(t => t.stop()); };
+        return () => {
+            stream?.getTracks().forEach(t => t.stop());
+            if (previewRef.current) previewRef.current.srcObject = null;
+        };
     }, []);
 
     // ── Always listen for session-ended (works in lobby + call phase) ─────
     useEffect(() => {
         function onSessionEnded() {
             lobbyStream?.getTracks().forEach(t => t.stop());
+            if (previewRef.current) previewRef.current.srcObject = null;
             stopMedia();
             setSessionEndedByHost(true);
         }
         function onCallEnded() {
             lobbyStream?.getTracks().forEach(t => t.stop());
+            if (previewRef.current) previewRef.current.srcObject = null;
             stopMedia();
             toast('📞 Host ended the call', 'warn');
             setTimeout(() => onLeave(), 1200);
@@ -169,29 +169,58 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     async function joinCall() {
         lobbyStream?.getTracks().forEach(t => t.stop());
         setLobbyStream(null);
-        setPhase('call');
         setMicOn(lobbyMic);
         setCamOn(lobbyCam);
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: lobbyCam, audio: lobbyMic });
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: lobbyCam ? { width: { ideal: 1280 }, height: { ideal: 720 } } : false,
+                audio: lobbyMic ? { echoCancellation: true, noiseSuppression: true } : false,
+            });
             streamRef.current = stream;
+            // Set phase AFTER stream is ready so socket listeners are active
+            setPhase('call');
+            // Small delay to let useEffect re-run with phase='call' and register socket listeners
+            await new Promise(r => setTimeout(r, 100));
             if (localRef.current) localRef.current.srcObject = stream;
             await ensurePC();
-            if (user.role === 'mentor') await makeOffer();
-            else socket.emit('peer-ready', { sessionId });
-            // Add self to participants
+            if (user.role === 'mentor') {
+                await makeOffer();
+            } else {
+                socket.emit('peer-ready', { sessionId });
+            }
             setParticipants([{ id: user.id, name: user.name, role: user.role, micOn: lobbyMic, handRaised: false }]);
         } catch (err: any) {
-            setError(`Could not start camera: ${err.message}`);
+            setError(`Could not start camera/mic: ${err.message}`);
             setStatus('error');
+            setPhase('call');
         }
     }
 
     async function ensurePC(): Promise<RTCPeerConnection> {
         if (pcRef.current) return pcRef.current;
-        const pc = new RTCPeerConnection(ICE);
+        const pc = new RTCPeerConnection({
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:stun3.l.google.com:19302' },
+                { urls: 'stun:stun4.l.google.com:19302' },
+            ],
+            iceCandidatePoolSize: 10,
+        });
         pcRef.current = pc;
-        pc.onicecandidate = e => { if (e.candidate) socket.emit('webrtc-ice-candidate', { sessionId, candidate: e.candidate }); };
+
+        pc.onicecandidate = e => {
+            if (e.candidate) socket.emit('webrtc-ice-candidate', { sessionId, candidate: e.candidate });
+        };
+
+        pc.oniceconnectionstatechange = () => {
+            if (pc.iceConnectionState === 'failed') {
+                // Try ICE restart
+                pc.restartIce();
+            }
+        };
+
         pc.onconnectionstatechange = () => {
             if (pc.connectionState === 'connected') {
                 setStatus('connected');
@@ -207,11 +236,21 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 toast(`${peerName || 'Peer'} disconnected`, 'warn');
             }
         };
+
         pc.ontrack = e => {
-            if (remoteRef.current) remoteRef.current.srcObject = e.streams[0];
-            setRemoteOn(true); setStatus('connected');
+            if (remoteRef.current) {
+                remoteRef.current.srcObject = e.streams[0];
+                // Ensure video plays
+                remoteRef.current.play().catch(() => { });
+            }
+            setRemoteOn(true);
+            setStatus('connected');
         };
-        streamRef.current?.getTracks().forEach(t => pc.addTrack(t, streamRef.current!));
+
+        // Add all local tracks
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(t => pc.addTrack(t, streamRef.current!));
+        }
         return pc;
     }
 
@@ -223,9 +262,18 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     }
 
     function stopMedia() {
+        // Stop all tracks — this turns off the camera/mic light
         streamRef.current?.getTracks().forEach(t => t.stop());
-        screenTrackRef.current?.stop(); screenTrackRef.current = null;
-        pcRef.current?.close(); pcRef.current = null; streamRef.current = null;
+        screenTrackRef.current?.stop();
+        screenTrackRef.current = null;
+        // Clear video elements
+        if (localRef.current) { localRef.current.srcObject = null; }
+        if (remoteRef.current) { remoteRef.current.srcObject = null; }
+        if (previewRef.current) { previewRef.current.srcObject = null; }
+        // Close peer connection
+        pcRef.current?.close();
+        pcRef.current = null;
+        streamRef.current = null;
     }
 
     function toggleMic() {
