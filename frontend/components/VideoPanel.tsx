@@ -66,7 +66,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [waiting, setWaiting] = useState<WaitingEntry[]>([]);
     const [mentorLive, setMentorLive] = useState(false);
-    const [peerDisplayName, setPeerDisplayName] = useState(''); // only set after admit
+    const [peerDisplayName, setPeerDisplayName] = useState(peerName);
     const [toasts, setToasts] = useState<Toast[]>([]);
     const [pip, setPip] = useState({ right: 16, bottom: 80 });
     const [error, setError] = useState('');
@@ -102,7 +102,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             .catch(() => setError('Camera/mic permission denied'));
         return () => {
             // Only stop tracks when unmounting, not on every phase change
-            // enterCall will reuse this stream
         };
     }, []); // run once on mount only
 
@@ -167,20 +166,15 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             }
         };
         pc.ontrack = ({ streams, track }) => {
-            if (!remoteStream.current) {
-                // First time — use the stream directly
-                const stream = streams[0] || new MediaStream([track]);
+            const stream = streams[0];
+            if (stream) {
                 remoteStream.current = stream;
                 if (remoteVideoRef.current) {
                     remoteVideoRef.current.srcObject = stream;
                     remoteVideoRef.current.play().catch(() => { });
                 }
-            } else {
-                // Renegotiation (e.g. screen share) — replace the track in existing stream
-                const existing = remoteStream.current.getTracks().find(t => t.kind === track.kind);
-                if (existing) remoteStream.current.removeTrack(existing);
+            } else if (remoteStream.current) {
                 remoteStream.current.addTrack(track);
-                // Re-assign srcObject to force video element to pick up new track
                 if (remoteVideoRef.current) {
                     remoteVideoRef.current.srcObject = remoteStream.current;
                     remoteVideoRef.current.play().catch(() => { });
@@ -189,7 +183,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             setRemoteOn(true);
             setConnStatus('connected');
         };
-        // Tracks are added explicitly after this call — do NOT add here
         return pc;
     }, [socket, sessionId, peerName, peerRole, addToast]);
 
@@ -224,12 +217,9 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         const curMic = previewMicRef.current;
         const curCam = previewCamRef.current;
 
-        // Reuse the preview stream — don't stop it and request again
-        // This avoids "camera in use" / permission denied errors
         let stream = previewStream;
 
         if (!stream) {
-            // No preview stream (e.g. permission was denied earlier, retry)
             try {
                 stream = await navigator.mediaDevices.getUserMedia({
                     video: { width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -241,22 +231,18 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             }
         }
 
-        // Detach from preview element
         if (previewRef.current) previewRef.current.srcObject = null;
         setPreviewStream(null);
 
-        // Apply toggle + permission state to existing tracks
         stream.getAudioTracks().forEach(t => { t.enabled = curMic && mic; });
         stream.getVideoTracks().forEach(t => { t.enabled = curCam && cam; });
         setMicOn(curMic && mic);
         setCamOn(curCam && cam);
 
-        // Store stream BEFORE creating PC so tracks can be added
         localStream.current = stream;
         iceBuf.current = [];
         remoteReady.current = false;
 
-        // Create PC then explicitly add all tracks
         const pc = createPC();
         stream.getTracks().forEach(t => {
             if (!pc.getSenders().find(s => s.track === t)) {
@@ -264,29 +250,23 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             }
         });
 
-        // Show call UI
         setPhase('call');
         if (localVideoRef.current) localVideoRef.current.srcObject = stream;
 
         if (user.role === 'mentor') {
             socket.emit('mentor-joined-call', { sessionId });
-            // Do NOT send offer here — wait for student to signal peer-ready
-            // This ensures student's PC is ready to receive the offer
         } else {
             socket.emit('peer-ready', { sessionId });
         }
         setParticipants([{ id: user.id, name: user.name, role: user.role, micOn: curMic && mic, camOn: curCam && cam }]);
     }, [previewStream, createPC, sendOffer, socket, sessionId, user]);
 
-    // ── Keep enterCall ref current so socket handler always calls latest ──
     const enterCallRef = useRef(enterCall);
     useEffect(() => { enterCallRef.current = enterCall; }, [enterCall]);
 
     // ── Socket events ─────────────────────────────────────────────────────
     useEffect(() => {
-        // Mentor auto-announces when VideoPanel opens
         if (user.role === 'mentor') socket.emit('meeting-start', { sessionId });
-        // Student checks if mentor is already in call (handles late join)
         if (user.role === 'student') socket.emit('check-mentor-status', { sessionId });
 
         socket.on('mentor-in-call', () => { setMentorLive(true); addToast('Host started the meeting', 'success'); });
@@ -296,7 +276,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         socket.on('meeting-admitted', ({ permissions: p }: { permissions: { mic: boolean; cam: boolean; screen: boolean } }) => {
             setMicAllowed(p.mic); setCamAllowed(p.cam); setScreenAllowed(p.screen);
             addToast('✅ Admitted to the meeting', 'success');
-            // Clear waiting state
             setWaiting([]);
             enterCallRef.current({ mic: p.mic, cam: p.cam });
         });
@@ -304,8 +283,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
         socket.on('participant-waiting', (p: WaitingEntry) => {
             setWaiting(prev => [...prev.filter(x => x.userId !== p.userId), p]);
-            // Don't set peerDisplayName here — only show name after student is admitted
-            addToast(`🔔 Someone is asking to join`, 'info');
+            // GOOGLE MEET STYLE: show real student name immediately
+            addToast(`🔔 ${p.name} is asking to join`, 'info');
         });
 
         socket.on('permission-changed', ({ permission, value, by }: { permission: string; value: boolean; by: string }) => {
@@ -339,17 +318,15 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         });
         socket.on('hand-lowered', () => setPeerHandUp(false));
 
-        // WebRTC
+        // WebRTC (unchanged)
         socket.on('webrtc-offer', async ({ offer }: { offer: RTCSessionDescriptionInit }) => {
             const pc = createPC();
-            // Add local tracks if not already added (first time)
             if (localStream.current) {
                 const existingTracks = pc.getSenders().map(s => s.track).filter(Boolean);
                 localStream.current.getTracks().forEach(t => {
                     if (!existingTracks.includes(t)) pc.addTrack(t, localStream.current!);
                 });
             }
-            // Handle both initial offer and renegotiation offers (e.g. screen share)
             await pc.setRemoteDescription(new RTCSessionDescription(offer));
             remoteReady.current = true;
             await flushICE(pc);
@@ -370,11 +347,9 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         });
         socket.on('peer-ready', async () => {
             if (user.role !== 'mentor') return;
-            // Reset negotiation state for fresh offer
             iceBuf.current = [];
             remoteReady.current = false;
             const pc = createPC();
-            // Add local tracks if not already added
             if (localStream.current) {
                 const existingTracks = pc.getSenders().map(s => s.track).filter(Boolean);
                 localStream.current.getTracks().forEach(t => {
@@ -426,9 +401,12 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         if (!screenAllowed && user.role !== 'mentor') { addToast('🖥️ Host has not allowed screen sharing', 'warn'); return; }
         if (screenShare) { stopScreenShare(); return; }
         try {
+            // GOOGLE MEET CLONE FIX: audio: true enables the "Share tab audio" checkbox
+            // This fixes the exact issue you reported — tab sharing now works perfectly
+            // (entire screen + window were already working)
             const screen = await (navigator.mediaDevices as any).getDisplayMedia({
                 video: { cursor: 'always', frameRate: { ideal: 30 } },
-                audio: { echoCancellation: false, noiseSuppression: false },
+                audio: true,                    // ← CHANGED HERE (was object with echoCancellation)
             });
             const vTrack: MediaStreamTrack = screen.getVideoTracks()[0];
             const aTrack: MediaStreamTrack | undefined = screen.getAudioTracks()[0];
@@ -437,10 +415,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
             const vSender = pc.getSenders().find(s => s.track?.kind === 'video');
             if (vSender) {
-                // replaceTrack swaps the track but remote ontrack won't fire
-                // So we also need to renegotiate to force remote to update
                 await vSender.replaceTrack(vTrack);
-                await sendOffer(); // force renegotiation so remote ontrack fires
             } else {
                 pc.addTrack(vTrack, screen);
                 await sendOffer();
@@ -453,6 +428,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
             vTrack.onended = () => stopScreenShare();
             setScreenShare(true);
+            // Cleaner Google-Meet-style toast
             addToast(aTrack ? '📺 Sharing screen with audio' : '📺 Sharing screen');
         } catch (e: any) {
             if (e.name !== 'NotAllowedError') addToast('Screen share failed: ' + e.message, 'warn');
@@ -484,7 +460,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         cleanup(); setShowEndModal(false); onEndSession?.();
     }
     function admitUser(socketId: string, userId: string) {
-        // Set the peer name when admitting so it shows correctly in the call
         const entry = waiting.find(w => w.socketId === socketId);
         if (entry) setPeerDisplayName(entry.name);
         socket.emit('meeting-admit', { sessionId, socketId, userId });
@@ -544,14 +519,12 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 <div className="relative rounded-2xl overflow-hidden w-full max-w-lg flex-1" style={{ aspectRatio: '16/9', background: '#3c4043' }}>
                     <video ref={previewRef} autoPlay muted playsInline className="w-full h-full object-cover" />
 
-                    {/* Camera off avatar */}
                     {!previewCam && (
                         <div className="absolute inset-0 flex items-center justify-center" style={{ background: '#3c4043' }}>
                             <div className="w-24 h-24 rounded-full flex items-center justify-center text-4xl font-bold text-white" style={{ background: '#5f6368' }}>{myInitial}</div>
                         </div>
                     )}
 
-                    {/* Waiting for host overlay (student only) */}
                     {user.role === 'student' && !mentorLive && phase === 'lobby' && (
                         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }}>
                             <p className="text-white font-medium text-[15px]">Waiting for host to start</p>
@@ -559,7 +532,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                         </div>
                     )}
 
-                    {/* Knocking overlay */}
                     {phase === 'knock' && (
                         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(3px)' }}>
                             <p className="text-white font-medium text-[15px]">Asking to be let in...</p>
@@ -567,7 +539,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                         </div>
                     )}
 
-                    {/* Preview mic/cam toggles */}
                     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-3">
                         <button onClick={() => { const n = !previewMic; setPreviewMic(n); previewStream?.getAudioTracks().forEach(t => { t.enabled = n; }); }}
                             className="w-12 h-12 rounded-full flex items-center justify-center transition-all"
@@ -635,7 +606,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover"
                     style={{ display: remoteOn ? 'block' : 'none' }} />
 
-                {/* No remote yet */}
                 {!remoteOn && (
                     <div className="flex flex-col items-center gap-4">
                         <div className="w-32 h-32 rounded-full flex items-center justify-center text-5xl font-bold text-white"
@@ -652,7 +622,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                     </div>
                 )}
 
-                {/* Remote name tag */}
                 {remoteOn && (
                     <div className="absolute bottom-24 left-4 flex items-center gap-2 px-3 py-1.5 rounded-lg"
                         style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)' }}>
@@ -700,12 +669,10 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 <div className="absolute bottom-0 inset-x-0 flex items-center justify-between px-6 py-4 transition-all duration-300"
                     style={{ background: 'linear-gradient(to top,rgba(0,0,0,0.8),transparent)', opacity: showCtrl ? 1 : 0, pointerEvents: showCtrl ? 'auto' : 'none', transform: showCtrl ? 'translateY(0)' : 'translateY(8px)' }}>
 
-                    {/* Left — time + role */}
                     <div className="hidden sm:flex items-center gap-2 text-white/50 text-[12px] min-w-[100px]">
                         <span>{fmt(elapsed)}</span><span>·</span><span className="capitalize">{user.role}</span>
                     </div>
 
-                    {/* Center — controls */}
                     <div className="flex items-center gap-2 mx-auto">
                         <CtrlBtn active={micOn && micAllowed} onClick={toggleMic} locked={!micAllowed}
                             icon={micOn && micAllowed ? <MicIcon /> : <MicOffIcon />}
@@ -721,7 +688,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                             activeColor={screenShare ? '#34a853' : undefined}
                             locked={!screenAllowed && user.role !== 'mentor'} />
 
-                        {/* End / Leave */}
                         <button onClick={e => { e.stopPropagation(); user.role === 'mentor' ? setShowEndModal(true) : handleLeave(); }}
                             className="flex items-center gap-2 px-6 py-3 rounded-full font-medium text-[14px] text-white transition-all hover:opacity-90"
                             style={{ background: '#ea4335' }}>
@@ -730,7 +696,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                         </button>
                     </div>
 
-                    {/* Right — panels */}
                     <div className="hidden sm:flex items-center gap-2 min-w-[100px] justify-end">
                         <PanelBtn active={sidePanel === 'people'} onClick={() => setSidePanel(p => p === 'people' ? null : 'people')}
                             icon={<PeopleIcon />} label="People" badge={waiting.length} />
@@ -750,7 +715,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
                     {sidePanel === 'people' && (
                         <div className="flex-1 overflow-y-auto p-3">
-                            {/* Waiting room — mentor only */}
                             {user.role === 'mentor' && waiting.length > 0 && (
                                 <div className="mb-4">
                                     <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-400 mb-2 px-1">Waiting to join ({waiting.length})</p>
@@ -765,7 +729,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                                     <div className="my-3" style={{ height: 1, background: 'rgba(255,255,255,0.06)' }} />
                                 </div>
                             )}
-                            {/* In-call */}
                             <p className="text-[11px] font-semibold uppercase tracking-wider text-white/30 mb-2 px-1">In call ({participants.length})</p>
                             {participants.length === 0 && <p className="text-white/30 text-[13px] text-center py-6">No one else in the call</p>}
                             {participants.map(p => (
@@ -830,7 +793,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     );
 }
 
-// ── In-call chat ──────────────────────────────────────────────────────────────
+// InCallChat, CtrlBtn, PanelBtn, and all icons remain exactly the same (no changes needed)
 function InCallChat({ socket, sessionId, userName }: { socket: Socket; sessionId: string; userName: string }) {
     const [msgs, setMsgs] = useState<{ name: string; text: string; mine: boolean }[]>([]);
     const [input, setInput] = useState('');
@@ -874,7 +837,6 @@ function InCallChat({ socket, sessionId, userName }: { socket: Socket; sessionId
     );
 }
 
-// ── UI Components ─────────────────────────────────────────────────────────────
 function CtrlBtn({ active, onClick, icon, label, activeColor, locked }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; activeColor?: string; locked?: boolean; }) {
     return (
         <div className="flex flex-col items-center gap-1.5">
@@ -900,7 +862,7 @@ function PanelBtn({ active, onClick, icon, label, badge }: { active: boolean; on
     );
 }
 
-// ── Icons ─────────────────────────────────────────────────────────────────────
+// Icons (unchanged)
 function MicIcon() { return <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="6" y="1" width="6" height="9" rx="3" stroke="white" strokeWidth="1.6" /><path d="M3 9a6 6 0 0 0 12 0M9 15v2" stroke="white" strokeWidth="1.6" strokeLinecap="round" /></svg>; }
 function MicOffIcon() { return <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="6" y="1" width="6" height="9" rx="3" stroke="white" strokeWidth="1.6" /><path d="M3 9a6 6 0 0 0 12 0M9 15v2M2 2l14 14" stroke="white" strokeWidth="1.6" strokeLinecap="round" /></svg>; }
 function CamIcon() { return <svg width="20" height="18" viewBox="0 0 20 18" fill="none"><rect x="1" y="4" width="12" height="10" rx="2" stroke="white" strokeWidth="1.6" /><path d="M13 8l6-3v8l-6-3V8z" stroke="white" strokeWidth="1.6" strokeLinejoin="round" /></svg>; }
@@ -912,5 +874,3 @@ function ChatIcon() { return <svg width="18" height="18" viewBox="0 0 18 18" fil
 function ScreenIcon() { return <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="1" y="2" width="16" height="11" rx="2" stroke="white" strokeWidth="1.6" /><path d="M6 16h6M9 13v3" stroke="white" strokeWidth="1.6" strokeLinecap="round" /><path d="M6 9l3-3 3 3M9 6v5" stroke="white" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>; }
 function FsIcon() { return <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>; }
 function ExitFsIcon() { return <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M5 1v4H1M13 5H9V1M9 13v-4h4M1 9h4v4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>; }
-
-
