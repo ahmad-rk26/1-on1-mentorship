@@ -66,6 +66,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [waiting, setWaiting] = useState<WaitingEntry[]>([]);
     const [mentorLive, setMentorLive] = useState(false);
+    const [peerDisplayName, setPeerDisplayName] = useState(peerName);
     const [toasts, setToasts] = useState<Toast[]>([]);
     const [pip, setPip] = useState({ right: 16, bottom: 80 });
     const [error, setError] = useState('');
@@ -147,17 +148,17 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         pc.onconnectionstatechange = () => {
             if (pc.connectionState === 'connected') {
                 setConnStatus('connected');
-                addToast(`📞 ${peerName || 'Peer'} joined`, 'success');
+                addToast(`📞 Connected`, 'success');
                 setParticipants(prev =>
                     prev.find(p => p.role === peerRole) ? prev :
-                        [...prev, { id: 'peer', name: peerName || peerRole, role: peerRole, micOn: true, camOn: true }]
+                        [...prev, { id: 'peer', name: displayName, role: peerRole, micOn: true, camOn: true }]
                 );
             }
             if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
                 setConnStatus('connecting');
                 setRemoteOn(false);
                 setParticipants(prev => prev.filter(p => p.role !== peerRole));
-                addToast(`${peerName || 'Peer'} left the call`, 'warn');
+                addToast(`${displayName} left the call`, 'warn');
             }
         };
         pc.ontrack = ({ streams }) => {
@@ -170,8 +171,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             setRemoteOn(true);
             setConnStatus('connected');
         };
-        // Add local tracks
-        localStream.current?.getTracks().forEach(t => pc.addTrack(t, localStream.current!));
+        // Tracks are added explicitly after this call — do NOT add here
         return pc;
     }, [socket, sessionId, peerName, peerRole, addToast]);
 
@@ -190,9 +190,22 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         iceBuf.current = [];
     }, []);
 
+    // ── Keep phase ref current for socket handlers ────────────────────────
+    const phaseRef = useRef<Phase>('lobby');
+    useEffect(() => { phaseRef.current = phase; }, [phase]);
+
+    const previewMicRef = useRef(true);
+    const previewCamRef = useRef(true);
+    useEffect(() => { previewMicRef.current = previewMic; }, [previewMic]);
+    useEffect(() => { previewCamRef.current = previewCam; }, [previewCam]);
+
     // ── Enter the call ────────────────────────────────────────────────────
-    const enterCall = useCallback(async (perms = { mic: micAllowed, cam: camAllowed }) => {
-        // Stop preview
+    const enterCall = useCallback(async (perms?: { mic: boolean; cam: boolean }) => {
+        const mic = perms ? perms.mic : true;
+        const cam = perms ? perms.cam : true;
+        const curMic = previewMicRef.current;
+        const curCam = previewCamRef.current;
+        // Stop preview stream
         previewStream?.getTracks().forEach(t => t.stop());
         setPreviewStream(null);
         try {
@@ -200,18 +213,25 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 video: { width: { ideal: 1280 }, height: { ideal: 720 } },
                 audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
             });
-            // Apply permission/toggle state
-            stream.getAudioTracks().forEach(t => { t.enabled = previewMic && perms.mic; });
-            stream.getVideoTracks().forEach(t => { t.enabled = previewCam && perms.cam; });
-            setMicOn(previewMic && perms.mic);
-            setCamOn(previewCam && perms.cam);
+            // Apply toggle + permission state
+            stream.getAudioTracks().forEach(t => { t.enabled = curMic && mic; });
+            stream.getVideoTracks().forEach(t => { t.enabled = curCam && cam; });
+            setMicOn(curMic && mic);
+            setCamOn(curCam && cam);
+            // Store stream BEFORE creating PC so tracks can be added
             localStream.current = stream;
             iceBuf.current = [];
             remoteReady.current = false;
-            // Create PC with tracks
-            createPC();
+            // Create PC then explicitly add all tracks
+            const pc = createPC();
+            stream.getTracks().forEach(t => {
+                if (!pc.getSenders().find(s => s.track === t)) {
+                    pc.addTrack(t, stream);
+                }
+            });
             // Show call UI
             setPhase('call');
+            // Set local video element
             if (localVideoRef.current) localVideoRef.current.srcObject = stream;
             if (user.role === 'mentor') {
                 socket.emit('mentor-joined-call', { sessionId });
@@ -219,11 +239,15 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             } else {
                 socket.emit('peer-ready', { sessionId });
             }
-            setParticipants([{ id: user.id, name: user.name, role: user.role, micOn: previewMic, camOn: previewCam }]);
+            setParticipants([{ id: user.id, name: user.name, role: user.role, micOn: curMic && mic, camOn: curCam && cam }]);
         } catch (e: any) {
             setError(`Camera/mic error: ${e.message}`);
         }
-    }, [previewMic, previewCam, previewStream, micAllowed, camAllowed, createPC, sendOffer, socket, sessionId, user]);
+    }, [previewStream, createPC, sendOffer, socket, sessionId, user]);
+
+    // ── Keep enterCall ref current so socket handler always calls latest ──
+    const enterCallRef = useRef(enterCall);
+    useEffect(() => { enterCallRef.current = enterCall; }, [enterCall]);
 
     // ── Socket events ─────────────────────────────────────────────────────
     useEffect(() => {
@@ -231,18 +255,20 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         if (user.role === 'mentor') socket.emit('meeting-start', { sessionId });
 
         socket.on('mentor-in-call', () => { setMentorLive(true); addToast('Host started the meeting', 'success'); });
-        socket.on('mentor-left-call', () => { setMentorLive(false); if (phase === 'knock') { setPhase('lobby'); addToast('Host left', 'warn'); } });
+        socket.on('mentor-left-call', () => { setMentorLive(false); if (phaseRef.current === 'knock') { setPhase('lobby'); addToast('Host left', 'warn'); } });
         socket.on('meeting-not-started', () => { setPhase('lobby'); addToast('Host has not started yet', 'warn'); });
 
         socket.on('meeting-admitted', ({ permissions: p }: { permissions: { mic: boolean; cam: boolean; screen: boolean } }) => {
             setMicAllowed(p.mic); setCamAllowed(p.cam); setScreenAllowed(p.screen);
             addToast('✅ Admitted to the meeting', 'success');
-            enterCall({ mic: p.mic, cam: p.cam });
+            enterCallRef.current({ mic: p.mic, cam: p.cam });
         });
         socket.on('meeting-denied', () => { setPhase('lobby'); addToast('❌ Request denied', 'warn'); });
 
         socket.on('participant-waiting', (p: WaitingEntry) => {
             setWaiting(prev => [...prev.filter(x => x.userId !== p.userId), p]);
+            // Store name so we can show it when they join
+            setPeerDisplayName(p.name);
             addToast(`🔔 Someone is asking to join`, 'info');
         });
 
@@ -301,8 +327,13 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         socket.on('peer-ready', async () => {
             if (user.role !== 'mentor') return;
             const pc = createPC();
-            if (localStream.current && pc.getSenders().filter(s => s.track).length === 0)
-                localStream.current.getTracks().forEach(t => pc.addTrack(t, localStream.current!));
+            // Ensure local tracks are added before making offer
+            if (localStream.current) {
+                const existingTracks = pc.getSenders().map(s => s.track).filter(Boolean);
+                localStream.current.getTracks().forEach(t => {
+                    if (!existingTracks.includes(t)) pc.addTrack(t, localStream.current!);
+                });
+            }
             await sendOffer();
         });
 
@@ -424,7 +455,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
     const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
     const myInitial = user.name.charAt(0).toUpperCase();
-    const peerInitial = peerName ? peerName.charAt(0).toUpperCase() : peerRole.charAt(0).toUpperCase();
+    const displayName = peerDisplayName || peerName || peerRole;
+    const peerInitial = displayName.charAt(0).toUpperCase();
 
     // ── SESSION ENDED ─────────────────────────────────────────────────────
     if (ended) return (
@@ -543,7 +575,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                             style={{ background: peerRole === 'mentor' ? '#7c3aed' : '#0891b2' }}>
                             {peerInitial}
                         </div>
-                        <p className="text-white text-xl font-medium">{peerName || peerRole}</p>
+                        <p className="text-white text-xl font-medium">{displayName}</p>
                         <p className="text-white/40 text-sm">
                             {connStatus === 'connecting' ? 'Waiting to join...' : 'Camera is off'}
                         </p>
@@ -557,7 +589,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 {remoteOn && (
                     <div className="absolute bottom-24 left-4 flex items-center gap-2 px-3 py-1.5 rounded-lg"
                         style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)' }}>
-                        <span className="text-white text-[13px]">{peerName || peerRole}</span>
+                        <span className="text-white text-[13px]">{displayName}</span>
                         {peerHandUp && <span className="animate-bounce">✋</span>}
                     </div>
                 )}
@@ -813,3 +845,5 @@ function ChatIcon() { return <svg width="18" height="18" viewBox="0 0 18 18" fil
 function ScreenIcon() { return <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="1" y="2" width="16" height="11" rx="2" stroke="white" strokeWidth="1.6" /><path d="M6 16h6M9 13v3" stroke="white" strokeWidth="1.6" strokeLinecap="round" /><path d="M6 9l3-3 3 3M9 6v5" stroke="white" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>; }
 function FsIcon() { return <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>; }
 function ExitFsIcon() { return <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M5 1v4H1M13 5H9V1M9 13v-4h4M1 9h4v4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>; }
+
+
