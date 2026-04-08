@@ -273,6 +273,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     useEffect(() => {
         // Mentor auto-announces when VideoPanel opens
         if (user.role === 'mentor') socket.emit('meeting-start', { sessionId });
+        // Student checks if mentor is already in call (handles late join)
+        if (user.role === 'student') socket.emit('check-mentor-status', { sessionId });
 
         socket.on('mentor-in-call', () => { setMentorLive(true); addToast('Host started the meeting', 'success'); });
         socket.on('mentor-left-call', () => { setMentorLive(false); if (phaseRef.current === 'knock') { setPhase('lobby'); addToast('Host left', 'warn'); } });
@@ -281,6 +283,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         socket.on('meeting-admitted', ({ permissions: p }: { permissions: { mic: boolean; cam: boolean; screen: boolean } }) => {
             setMicAllowed(p.mic); setCamAllowed(p.cam); setScreenAllowed(p.screen);
             addToast('✅ Admitted to the meeting', 'success');
+            // Clear waiting state
+            setWaiting([]);
             enterCallRef.current({ mic: p.mic, cam: p.cam });
         });
         socket.on('meeting-denied', () => { setPhase('lobby'); addToast('❌ Request denied', 'warn'); });
@@ -409,20 +413,38 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         if (!screenAllowed && user.role !== 'mentor') { addToast('🖥️ Host has not allowed screen sharing', 'warn'); return; }
         if (screenShare) { stopScreenShare(); return; }
         try {
-            const screen = await (navigator.mediaDevices as any).getDisplayMedia({ video: { cursor: 'always' }, audio: true });
+            // Request screen capture — audio is optional (user checks "Share tab audio" in browser)
+            // Do NOT force audio:true as it can cause blank video on some browsers/OS
+            const screen = await (navigator.mediaDevices as any).getDisplayMedia({
+                video: { cursor: 'always', frameRate: { ideal: 30 } },
+                audio: { echoCancellation: false, noiseSuppression: false },
+            });
             const vTrack: MediaStreamTrack = screen.getVideoTracks()[0];
             const aTrack: MediaStreamTrack | undefined = screen.getAudioTracks()[0];
             const pc = pcRef.current;
-            if (pc) {
-                const vSender = pc.getSenders().find(s => s.track?.kind === 'video');
-                if (vSender) await vSender.replaceTrack(vTrack);
-                else { pc.addTrack(vTrack, screen); await sendOffer(); }
-                if (aTrack) { pc.addTrack(aTrack, screen); await sendOffer(); }
+            if (!pc) { addToast('Not in call', 'warn'); return; }
+
+            // Replace existing video sender (no renegotiation needed)
+            const vSender = pc.getSenders().find(s => s.track?.kind === 'video');
+            if (vSender) {
+                await vSender.replaceTrack(vTrack);
+            } else {
+                pc.addTrack(vTrack, screen);
+                await sendOffer(); // renegotiate only if adding new sender
             }
+
+            // Add screen audio if captured (separate sender, needs renegotiation)
+            if (aTrack) {
+                pc.addTrack(aTrack, screen);
+                await sendOffer();
+            }
+
             vTrack.onended = () => stopScreenShare();
             setScreenShare(true);
-            addToast('📺 Screen sharing' + (aTrack ? ' with audio' : ''));
-        } catch (e: any) { if (e.name !== 'NotAllowedError') addToast('Screen share failed', 'warn'); }
+            addToast(aTrack ? '📺 Sharing screen with audio' : '📺 Sharing screen (check "Share tab audio" for audio)');
+        } catch (e: any) {
+            if (e.name !== 'NotAllowedError') addToast('Screen share failed: ' + e.message, 'warn');
+        }
     }
     function stopScreenShare() {
         const camTrack = localStream.current?.getVideoTracks()[0];

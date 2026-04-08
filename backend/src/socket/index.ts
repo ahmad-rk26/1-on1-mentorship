@@ -71,6 +71,12 @@ export function setupSocket(io: Server) {
             socket.to(sessionId).emit('mentor-in-call');
         });
 
+        // ── Student asks if mentor is in call (for late joiners) ───────────
+        socket.on('check-mentor-status', ({ sessionId }: { sessionId: string }) => {
+            const m = getMeeting(sessionId);
+            if (m.mentorInCall) socket.emit('mentor-in-call');
+        });
+
         // ── Meeting: mentor left the call (back to editor) ─────────────────
         socket.on('mentor-left-call', ({ sessionId }: { sessionId: string }) => {
             if (user.role !== 'mentor') return;
