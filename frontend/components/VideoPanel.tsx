@@ -166,12 +166,22 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 addToast(`${displayName} left the call`, 'warn');
             }
         };
-        pc.ontrack = ({ streams }) => {
+        pc.ontrack = ({ streams, track }) => {
+            // Always use the latest stream
             const stream = streams[0];
-            remoteStream.current = stream;
-            if (remoteVideoRef.current) {
-                remoteVideoRef.current.srcObject = stream;
-                remoteVideoRef.current.play().catch(() => { });
+            if (stream) {
+                remoteStream.current = stream;
+                if (remoteVideoRef.current) {
+                    remoteVideoRef.current.srcObject = stream;
+                    remoteVideoRef.current.play().catch(() => { });
+                }
+            } else if (remoteStream.current) {
+                // replaceTrack sends track without a stream — add to existing stream
+                remoteStream.current.addTrack(track);
+                if (remoteVideoRef.current) {
+                    remoteVideoRef.current.srcObject = remoteStream.current;
+                    remoteVideoRef.current.play().catch(() => { });
+                }
             }
             setRemoteOn(true);
             setConnStatus('connected');
@@ -291,8 +301,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
         socket.on('participant-waiting', (p: WaitingEntry) => {
             setWaiting(prev => [...prev.filter(x => x.userId !== p.userId), p]);
-            // Store name so we can show it when they join
-            setPeerDisplayName(p.name);
+            // Don't set peerDisplayName here — only show name after student is admitted
             addToast(`🔔 Someone is asking to join`, 'info');
         });
 
@@ -330,13 +339,14 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         // WebRTC
         socket.on('webrtc-offer', async ({ offer }: { offer: RTCSessionDescriptionInit }) => {
             const pc = createPC();
-            // Ensure student's local tracks are added before answering
+            // Add local tracks if not already added (first time)
             if (localStream.current) {
                 const existingTracks = pc.getSenders().map(s => s.track).filter(Boolean);
                 localStream.current.getTracks().forEach(t => {
                     if (!existingTracks.includes(t)) pc.addTrack(t, localStream.current!);
                 });
             }
+            // Handle both initial offer and renegotiation offers (e.g. screen share)
             await pc.setRemoteDescription(new RTCSessionDescription(offer));
             remoteReady.current = true;
             await flushICE(pc);
@@ -472,6 +482,9 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         cleanup(); setShowEndModal(false); onEndSession?.();
     }
     function admitUser(socketId: string, userId: string) {
+        // Set the peer name when admitting so it shows correctly in the call
+        const entry = waiting.find(w => w.socketId === socketId);
+        if (entry) setPeerDisplayName(entry.name);
         socket.emit('meeting-admit', { sessionId, socketId, userId });
         setWaiting(p => p.filter(x => x.socketId !== socketId));
         addToast('✅ Admitted', 'success');
