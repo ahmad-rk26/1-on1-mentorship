@@ -257,7 +257,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
         if (user.role === 'mentor') {
             socket.emit('mentor-joined-call', { sessionId });
-            await sendOffer();
+            // Do NOT send offer here — wait for student to signal peer-ready
+            // This ensures student's PC is ready to receive the offer
         } else {
             socket.emit('peer-ready', { sessionId });
         }
@@ -325,6 +326,13 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         // WebRTC
         socket.on('webrtc-offer', async ({ offer }: { offer: RTCSessionDescriptionInit }) => {
             const pc = createPC();
+            // Ensure student's local tracks are added before answering
+            if (localStream.current) {
+                const existingTracks = pc.getSenders().map(s => s.track).filter(Boolean);
+                localStream.current.getTracks().forEach(t => {
+                    if (!existingTracks.includes(t)) pc.addTrack(t, localStream.current!);
+                });
+            }
             await pc.setRemoteDescription(new RTCSessionDescription(offer));
             remoteReady.current = true;
             await flushICE(pc);
@@ -345,8 +353,11 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         });
         socket.on('peer-ready', async () => {
             if (user.role !== 'mentor') return;
+            // Reset negotiation state for fresh offer
+            iceBuf.current = [];
+            remoteReady.current = false;
             const pc = createPC();
-            // Ensure local tracks are added before making offer
+            // Add local tracks if not already added
             if (localStream.current) {
                 const existingTracks = pc.getSenders().map(s => s.track).filter(Boolean);
                 localStream.current.getTracks().forEach(t => {
