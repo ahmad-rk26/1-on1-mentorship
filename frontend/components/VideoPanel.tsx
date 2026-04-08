@@ -597,58 +597,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             </div>
         </div>
     );
-            <div className="flex gap-1.5">
-                {[0, 1, 2].map(i => <div key={i} className="w-2 h-2 rounded-full bg-amber-400/60 animate-bounce" style={{ animationDelay: `${i * 0.2}s` }} />)}
-            </div>
-            <button onClick={() => setPhase('pre')} className="text-sm text-white/30 hover:text-white/60 transition-colors">Cancel</button>
-        </div >
-    );
-
-    // ── LOBBY ─────────────────────────────────────────────────────────────
-    if (phase === 'lobby') return (
-        <div className="flex items-center justify-center h-full" style={{ background: '#111827' }}>
-            <div className="flex flex-col lg:flex-row items-center gap-10 px-6 max-w-4xl w-full">
-                <div className="relative rounded-2xl overflow-hidden flex-1 w-full max-w-md" style={{ aspectRatio: '16/9', background: '#1f2937' }}>
-                    <video ref={previewRef} autoPlay muted playsInline className="w-full h-full object-cover" />
-                    {!lobbyCam && (
-                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ background: '#1f2937' }}>
-                            <div className="w-20 h-20 rounded-full flex items-center justify-center text-3xl font-black" style={{ background: 'linear-gradient(135deg,#7c3aed,#4f46e5)' }}>{myInitial}</div>
-                            <p className="text-white/60 text-sm">Camera is off</p>
-                        </div>
-                    )}
-                    <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex gap-2">
-                        <button onClick={() => { const n = !lobbyMic; setLobbyMic(n); lobbyStream?.getAudioTracks().forEach(t => { t.enabled = n; }); }}
-                            className="w-10 h-10 rounded-full flex items-center justify-center transition-all"
-                            style={{ background: lobbyMic ? 'rgba(255,255,255,0.15)' : '#ea4335', backdropFilter: 'blur(8px)' }}>
-                            {lobbyMic ? <MicIcon /> : <MicOffIcon size={16} />}
-                        </button>
-                        <button onClick={() => { const n = !lobbyCam; setLobbyCam(n); lobbyStream?.getVideoTracks().forEach(t => { t.enabled = n; }); }}
-                            className="w-10 h-10 rounded-full flex items-center justify-center transition-all"
-                            style={{ background: lobbyCam ? 'rgba(255,255,255,0.15)' : '#ea4335', backdropFilter: 'blur(8px)' }}>
-                            {lobbyCam ? <CamIcon /> : <CamOffIcon />}
-                        </button>
-                    </div>
-                </div>
-                <div className="flex flex-col gap-5 flex-1 w-full max-w-xs">
-                    <div>
-                        <p className="text-white/50 text-sm mb-1">Ready to join?</p>
-                        <h2 className="text-white text-2xl font-bold">{sessionTitle}</h2>
-                        <p className="text-white/40 text-sm mt-1 capitalize">{user.role}</p>
-                    </div>
-                    {!permissions.mic && <p className="text-amber-400 text-[12px] flex items-center gap-1.5">🔇 Host has muted your microphone</p>}
-                    {!permissions.cam && <p className="text-amber-400 text-[12px] flex items-center gap-1.5">📷 Host has disabled your camera</p>}
-                    {error && <p className="text-red-400 text-sm">{error}</p>}
-                    <div className="flex flex-col gap-2 text-sm text-white/50">
-                        <span className="flex items-center gap-2"><span className="w-2 h-2 rounded-full" style={{ background: (permissions.mic && lobbyMic) ? '#10b981' : '#ef4444' }} />Microphone {(permissions.mic && lobbyMic) ? 'on' : 'off'}</span>
-                        <span className="flex items-center gap-2"><span className="w-2 h-2 rounded-full" style={{ background: (permissions.cam && lobbyCam) ? '#10b981' : '#ef4444' }} />Camera {(permissions.cam && lobbyCam) ? 'on' : 'off'}</span>
-                    </div>
-                    <button onClick={joinCall} className="w-full py-3 rounded-xl font-semibold text-[15px] text-white transition-all hover:scale-[1.02]" style={{ background: 'linear-gradient(135deg,#1a73e8,#1557b0)', boxShadow: '0 4px 20px rgba(26,115,232,0.4)' }}>Join now</button>
-                    <button onClick={onLeave} className="text-sm text-white/40 hover:text-white/70 transition-colors text-center">Cancel</button>
-                </div>
-            </div>
-        </div>
-    );
-
     // ── CALL ──────────────────────────────────────────────────────────────
     return (
         <div ref={containerRef} className="relative flex h-full overflow-hidden select-none" style={{ background: '#111827' }}
