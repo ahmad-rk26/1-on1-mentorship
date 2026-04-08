@@ -5,10 +5,11 @@ interface UserPayload { id: string; name: string; role: string; }
 
 // Per-session meeting state
 interface MeetingState {
-    active: boolean;           // mentor started the call
-    waitingRoom: Set<string>;  // student socket IDs waiting
-    admitted: Set<string>;     // admitted participant user IDs
-    permissions: Record<string, { mic: boolean; cam: boolean; screen: boolean }>; // per-user
+    active: boolean;
+    mentorInCall: boolean;      // mentor has actually joined the call (past lobby)
+    waitingRoom: Set<string>;
+    admitted: Set<string>;
+    permissions: Record<string, { mic: boolean; cam: boolean; screen: boolean }>;
 }
 
 const sessionUsers: Record<string, Set<string>> = {};
@@ -18,6 +19,7 @@ function getMeeting(sessionId: string): MeetingState {
     if (!meetings[sessionId]) {
         meetings[sessionId] = {
             active: false,
+            mentorInCall: false,
             waitingRoom: new Set(),
             admitted: new Set(),
             permissions: {},
@@ -54,11 +56,27 @@ export function setupSocket(io: Server) {
             if (user.role !== 'mentor') return;
             const m = getMeeting(sessionId);
             m.active = true;
-            // Admit mentor automatically
             m.admitted.add(user.id);
             m.permissions[user.id] = { mic: true, cam: true, screen: true };
-            // Notify everyone meeting is live
+            // Notify everyone meeting is live — but students still need to request join
             io.to(sessionId).emit('meeting-started', { hostName: user.name });
+        });
+
+        // ── Meeting: mentor actually entered the call (after lobby) ────────
+        socket.on('mentor-joined-call', ({ sessionId }: { sessionId: string }) => {
+            if (user.role !== 'mentor') return;
+            const m = getMeeting(sessionId);
+            m.active = true;
+            m.mentorInCall = true;
+            socket.to(sessionId).emit('mentor-in-call');
+        });
+
+        // ── Meeting: mentor left the call (back to editor) ─────────────────
+        socket.on('mentor-left-call', ({ sessionId }: { sessionId: string }) => {
+            if (user.role !== 'mentor') return;
+            const m = getMeeting(sessionId);
+            m.mentorInCall = false;
+            socket.to(sessionId).emit('mentor-left-call');
         });
 
         // ── Meeting: mentor ends the call ──────────────────────────────────
@@ -66,6 +84,7 @@ export function setupSocket(io: Server) {
             if (user.role !== 'mentor') return;
             const m = getMeeting(sessionId);
             m.active = false;
+            m.mentorInCall = false;
             m.waitingRoom.clear();
             m.admitted.clear();
             m.permissions = {};
@@ -76,13 +95,11 @@ export function setupSocket(io: Server) {
         socket.on('meeting-request-join', ({ sessionId }: { sessionId: string }) => {
             if (user.role !== 'student') return;
             const m = getMeeting(sessionId);
-            if (!m.active) {
+            if (!m.active || !m.mentorInCall) {
                 socket.emit('meeting-not-started');
                 return;
             }
-            // Add to waiting room
             m.waitingRoom.add(socket.id);
-            // Notify mentor someone is waiting
             socket.to(sessionId).emit('participant-waiting', { userId: user.id, name: user.name, socketId: socket.id });
         });
 
@@ -208,6 +225,7 @@ export function setupSocket(io: Server) {
                     // If mentor disconnects, mark meeting inactive
                     if (user.role === 'mentor' && meetings[room]) {
                         meetings[room].active = false;
+                        meetings[room].mentorInCall = false;
                         socket.to(room).emit('call-ended');
                     }
                     socket.to(room).emit('user-left', { userId: user.id, name: user.name });
