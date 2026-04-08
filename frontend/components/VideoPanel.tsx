@@ -120,6 +120,63 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         return () => { if (timerRef.current) clearInterval(timerRef.current); if (hideTimer.current) clearTimeout(hideTimer.current); };
     }, [phase]);
 
+    // ── WebRTC helpers (defined before socket useEffect to avoid stale closures) ──
+    const flushICE = useCallback(async (pc: RTCPeerConnection) => {
+        for (const c of iceBufRef.current) {
+            try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { }
+        }
+        iceBufRef.current = [];
+    }, []);
+
+    const makeOffer = useCallback(async () => {
+        const pc = pcRef.current;
+        if (!pc) return;
+        try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socket.emit('webrtc-offer', { sessionId, offer });
+        } catch (e) { console.error('makeOffer error', e); }
+    }, [socket, sessionId]);
+
+    const ensurePC = useCallback((): RTCPeerConnection => {
+        if (pcRef.current) return pcRef.current;
+        const pc = new RTCPeerConnection({ iceServers: TURN_SERVERS, iceCandidatePoolSize: 10 });
+        pcRef.current = pc;
+        pc.onicecandidate = e => {
+            if (e.candidate) socket.emit('webrtc-ice-candidate', { sessionId, candidate: e.candidate });
+        };
+        pc.oniceconnectionstatechange = () => {
+            if (pc.iceConnectionState === 'failed') pc.restartIce();
+        };
+        pc.onconnectionstatechange = () => {
+            if (pc.connectionState === 'connected') {
+                setStatus('connected');
+                toast(`📞 Connected`);
+                setParticipants(p => p.find(x => x.role === peerRole) ? p : [...p, { id: 'peer', name: peerName || peerRole, role: peerRole, micOn: true, camOn: true, handRaised: false }]);
+            }
+            if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+                setStatus('connecting');
+                setRemoteOn(false);
+                setParticipants(p => p.filter(x => x.role !== peerRole));
+                toast(`${peerName || 'Peer'} left the call`, 'warn');
+            }
+        };
+        pc.ontrack = e => {
+            const stream = e.streams[0];
+            remoteStreamRef.current = stream;
+            if (remoteRef.current) {
+                remoteRef.current.srcObject = stream;
+                remoteRef.current.play().catch(() => { });
+            }
+            setRemoteOn(true);
+            setStatus('connected');
+        };
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(t => pc.addTrack(t, streamRef.current!));
+        }
+        return pc;
+    }, [socket, sessionId, peerName, peerRole, toast]);
+
     // ── Socket events (registered once) ───────────────────────────────────
     useEffect(() => {
         // Mentor auto-starts meeting when VideoPanel mounts
@@ -156,8 +213,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         socket.on('meeting-admitted', ({ permissions: perms }: { permissions: Permissions }) => {
             setPermissions(perms);
             toast('✅ You were admitted', 'success');
-            // Stop lobby stream and join call
-            joinCall(perms);
+            // Use setTimeout to ensure state update is processed before joinCall
+            setTimeout(() => joinCall(perms), 100);
         });
 
         // Student: denied by mentor
@@ -210,7 +267,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
         // WebRTC signaling
         socket.on('webrtc-offer', async ({ offer }: { offer: RTCSessionDescriptionInit }) => {
-            const pc = await ensurePC();
+            const pc = ensurePC();
             await pc.setRemoteDescription(new RTCSessionDescription(offer));
             remoteSetRef.current = true;
             await flushICE(pc);
@@ -231,7 +288,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         socket.on('peer-ready', async () => {
             if (user.role !== 'mentor') return;
             // Ensure PC is created with local tracks before making offer
-            const pc = await ensurePC();
+            const pc = ensurePC();
             // If stream exists but no senders yet, add tracks now
             if (streamRef.current) {
                 const existingSenders = pc.getSenders().filter(s => s.track !== null);
@@ -255,53 +312,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 'webrtc-offer', 'webrtc-answer', 'webrtc-ice-candidate', 'peer-ready',
                 'hand-raised', 'hand-lowered'].forEach(e => socket.off(e));
         };
-    }, [socket, sessionId]);
-
-    // ── Helpers ───────────────────────────────────────────────────────────
-    async function flushICE(pc: RTCPeerConnection) {
-        for (const c of iceBufRef.current) { try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { } }
-        iceBufRef.current = [];
-    }
-
-    async function ensurePC(): Promise<RTCPeerConnection> {
-        if (pcRef.current) return pcRef.current;
-        const pc = new RTCPeerConnection({ iceServers: TURN_SERVERS, iceCandidatePoolSize: 10 });
-        pcRef.current = pc;
-        pc.onicecandidate = e => { if (e.candidate) socket.emit('webrtc-ice-candidate', { sessionId, candidate: e.candidate }); };
-        pc.oniceconnectionstatechange = () => { if (pc.iceConnectionState === 'failed') pc.restartIce(); };
-        pc.onconnectionstatechange = () => {
-            if (pc.connectionState === 'connected') {
-                setStatus('connected');
-                toast(`📞 ${peerName || 'Peer'} joined`);
-                setParticipants(p => p.find(x => x.role === peerRole) ? p : [...p, { id: 'peer', name: peerName || peerRole, role: peerRole, micOn: true, camOn: true, handRaised: false }]);
-            }
-            if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-                setStatus('connecting');
-                setRemoteOn(false);
-                setParticipants(p => p.filter(x => x.role !== peerRole));
-                toast(`${peerName || 'Peer'} left the call`, 'warn');
-            }
-        };
-        pc.ontrack = e => {
-            const stream = e.streams[0];
-            remoteStreamRef.current = stream;
-            if (remoteRef.current) {
-                remoteRef.current.srcObject = stream;
-                remoteRef.current.play().catch(() => { });
-            }
-            setRemoteOn(true);
-            setStatus('connected');
-        };
-        if (streamRef.current) streamRef.current.getTracks().forEach(t => pc.addTrack(t, streamRef.current!));
-        return pc;
-    }
-
-    async function makeOffer() {
-        if (!pcRef.current) return;
-        const offer = await pcRef.current.createOffer();
-        await pcRef.current.setLocalDescription(offer);
-        socket.emit('webrtc-offer', { sessionId, offer });
-    }
+    }, [socket, sessionId, ensurePC, makeOffer, flushICE]);
 
     function stopMedia() {
         streamRef.current?.getTracks().forEach(t => t.stop());
@@ -338,7 +349,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     }
 
     // ── Join call ─────────────────────────────────────────────────────────
-    async function joinCall(admittedPerms?: Permissions) {
+    const joinCall = useCallback(async (admittedPerms?: Permissions) => {
         const perms = admittedPerms ?? permissions;
         lobbyStream?.getTracks().forEach(t => t.stop());
         setLobbyStream(null);
@@ -349,32 +360,29 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 video: { width: { ideal: 1280 }, height: { ideal: 720 } },
                 audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
             });
-            // Apply toggle states — tracks always exist so senders are always present
             stream.getAudioTracks().forEach(t => { t.enabled = lobbyMic && perms.mic; });
             stream.getVideoTracks().forEach(t => { t.enabled = lobbyCam && perms.cam; });
             streamRef.current = stream;
             iceBufRef.current = [];
             remoteSetRef.current = false;
-            // Create PC and add tracks BEFORE setting phase or signaling
-            await ensurePC();
-            // Now show the call UI
+            // Create PC with tracks BEFORE signaling
+            ensurePC();
             setPhase('call');
+            // Set local video
             if (localRef.current) localRef.current.srcObject = stream;
             if (user.role === 'mentor') {
                 socket.emit('mentor-joined-call', { sessionId });
-                // Mentor makes offer immediately — student may already be waiting
                 await makeOffer();
             } else {
-                // Small delay so React renders the call phase and local video mounts
-                await new Promise(r => setTimeout(r, 150));
                 socket.emit('peer-ready', { sessionId });
             }
             setParticipants([{ id: user.id, name: user.name, role: user.role, micOn: lobbyMic, camOn: lobbyCam, handRaised: false }]);
         } catch (err: any) {
             setError(`Could not start camera/mic: ${err.message}`);
-            setStatus('error'); setPhase('call');
+            setStatus('error');
+            setPhase('call');
         }
-    }
+    }, [permissions, lobbyMic, lobbyCam, lobbyStream, ensurePC, makeOffer, socket, sessionId, user]);
 
     function toggleMic() {
         if (!permissions.mic) { toast('🔇 Host has muted your microphone', 'warn'); return; }
