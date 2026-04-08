@@ -94,10 +94,11 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         }
     }, [remoteOn]);
 
-    // ── Apply local stream when video element mounts ───────────────────────
+    // ── Apply local stream when call phase renders ─────────────────────────
     useEffect(() => {
         if (phase === 'call' && localRef.current && streamRef.current) {
             localRef.current.srcObject = streamRef.current;
+            localRef.current.play().catch(() => { });
         }
     }, [phase]);
 
@@ -168,7 +169,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         // Mentor: someone is knocking
         socket.on('participant-waiting', (p: { userId: string; name: string; socketId: string }) => {
             setWaitingRoom(prev => [...prev.filter(x => x.userId !== p.userId), p]);
-            toast(`🔔 ${p.name} is asking to join`, 'info');
+            // Show name only to mentor, not in public toast
+            toast(`🔔 Someone is asking to join`, 'info');
         });
 
         // Permission changed by host
@@ -228,9 +230,15 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         });
         socket.on('peer-ready', async () => {
             if (user.role !== 'mentor') return;
+            // Ensure PC is created with local tracks before making offer
             const pc = await ensurePC();
-            if (streamRef.current && pc.getSenders().length === 0)
-                streamRef.current.getTracks().forEach(t => pc.addTrack(t, streamRef.current!));
+            // If stream exists but no senders yet, add tracks now
+            if (streamRef.current) {
+                const existingSenders = pc.getSenders().filter(s => s.track !== null);
+                if (existingSenders.length === 0) {
+                    streamRef.current.getTracks().forEach(t => pc.addTrack(t, streamRef.current!));
+                }
+            }
             await makeOffer();
         });
         socket.on('hand-raised', ({ name }: { name: string }) => {
@@ -268,8 +276,10 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 setParticipants(p => p.find(x => x.role === peerRole) ? p : [...p, { id: 'peer', name: peerName || peerRole, role: peerRole, micOn: true, camOn: true, handRaised: false }]);
             }
             if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-                setStatus('connecting'); setRemoteOn(false);
-                toast(`${peerName || 'Peer'} disconnected`, 'warn');
+                setStatus('connecting');
+                setRemoteOn(false);
+                setParticipants(p => p.filter(x => x.role !== peerRole));
+                toast(`${peerName || 'Peer'} left the call`, 'warn');
             }
         };
         pc.ontrack = e => {
@@ -339,17 +349,24 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 video: { width: { ideal: 1280 }, height: { ideal: 720 } },
                 audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
             });
+            // Apply toggle states — tracks always exist so senders are always present
             stream.getAudioTracks().forEach(t => { t.enabled = lobbyMic && perms.mic; });
             stream.getVideoTracks().forEach(t => { t.enabled = lobbyCam && perms.cam; });
             streamRef.current = stream;
-            if (localRef.current) localRef.current.srcObject = stream;
-            iceBufRef.current = []; remoteSetRef.current = false;
+            iceBufRef.current = [];
+            remoteSetRef.current = false;
+            // Create PC and add tracks BEFORE setting phase or signaling
             await ensurePC();
+            // Now show the call UI
             setPhase('call');
+            if (localRef.current) localRef.current.srcObject = stream;
             if (user.role === 'mentor') {
                 socket.emit('mentor-joined-call', { sessionId });
+                // Mentor makes offer immediately — student may already be waiting
                 await makeOffer();
             } else {
+                // Small delay so React renders the call phase and local video mounts
+                await new Promise(r => setTimeout(r, 150));
                 socket.emit('peer-ready', { sessionId });
             }
             setParticipants([{ id: user.id, name: user.name, role: user.role, micOn: lobbyMic, camOn: lobbyCam, handRaised: false }]);
@@ -378,7 +395,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         if (!permissions.screen && user.role !== 'mentor') { toast('🖥️ Host has not allowed screen sharing', 'warn'); return; }
         if (screenSharing) { stopScreenShare(); return; }
         try {
-            // Request screen + system audio (works in Chrome — user must check "Share audio")
             const screen = await (navigator.mediaDevices as any).getDisplayMedia({
                 video: { cursor: 'always' },
                 audio: { echoCancellation: false, noiseSuppression: false, sampleRate: 44100 },
@@ -389,23 +405,24 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
             if (pcRef.current) {
                 const senders = pcRef.current.getSenders();
-                // Replace video track
                 const videoSender = senders.find(s => s.track?.kind === 'video');
-                if (videoSender) await videoSender.replaceTrack(videoTrack);
-                else pcRef.current.addTrack(videoTrack, screen);
-
-                // Add screen audio as a separate track if available
+                if (videoSender) {
+                    // replaceTrack doesn't need renegotiation
+                    await videoSender.replaceTrack(videoTrack);
+                } else {
+                    pcRef.current.addTrack(videoTrack, screen);
+                    // New track added — must renegotiate
+                    await makeOffer();
+                }
                 if (audioTrack) {
-                    const audioSender = senders.find(s => s.track?.kind === 'audio');
-                    if (audioSender) {
-                        // Mix: keep mic but also send screen audio via a new sender
-                        pcRef.current.addTrack(audioTrack, screen);
-                    }
+                    pcRef.current.addTrack(audioTrack, screen);
+                    // Renegotiate for the new audio track
+                    await makeOffer();
                 }
             }
             videoTrack.onended = () => stopScreenShare();
             setScreenSharing(true);
-            toast('📺 Screen sharing started' + (audioTrack ? ' with audio' : ' (no audio — check "Share audio" in browser)'));
+            toast('📺 Screen sharing started' + (audioTrack ? ' with audio' : ''));
         } catch (err: any) {
             if (err.name !== 'NotAllowedError') toast('Screen share failed', 'warn');
         }
@@ -609,11 +626,23 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                     style={{ display: remoteOn ? 'block' : 'none' }} />
                 {!remoteOn && (
                     <div className="flex flex-col items-center gap-4">
-                        <div className="w-28 h-28 rounded-full flex items-center justify-center text-5xl font-black"
-                            style={{ background: peerRole === 'mentor' ? 'linear-gradient(135deg,#7c3aed,#4f46e5)' : 'linear-gradient(135deg,#0891b2,#0e7490)', boxShadow: '0 0 60px rgba(124,58,237,0.3)' }}>{peerInitial}</div>
-                        <p className="text-white font-semibold text-xl">{displayPeer}</p>
-                        <p className="text-white/40 text-sm">{status === 'connecting' ? 'Waiting to join...' : 'Camera is off'}</p>
-                        {status === 'connecting' && <div className="flex gap-1.5 mt-1">{[0, 1, 2].map(i => <div key={i} className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />)}</div>}
+                        {status === 'connecting' && participants.length > 1 ? (
+                            // Peer was here but disconnected
+                            <>
+                                <div className="w-28 h-28 rounded-full flex items-center justify-center text-5xl font-black"
+                                    style={{ background: 'rgba(107,114,128,0.3)', boxShadow: '0 0 40px rgba(0,0,0,0.5)' }}>{peerInitial}</div>
+                                <p className="text-white font-semibold text-xl">{displayPeer} left</p>
+                                <p className="text-white/40 text-sm">No one else is in the call</p>
+                            </>
+                        ) : (
+                            <>
+                                <div className="w-28 h-28 rounded-full flex items-center justify-center text-5xl font-black"
+                                    style={{ background: peerRole === 'mentor' ? 'linear-gradient(135deg,#7c3aed,#4f46e5)' : 'linear-gradient(135deg,#0891b2,#0e7490)', boxShadow: '0 0 60px rgba(124,58,237,0.3)' }}>{peerInitial}</div>
+                                <p className="text-white font-semibold text-xl">{displayPeer}</p>
+                                <p className="text-white/40 text-sm">Waiting to join...</p>
+                                <div className="flex gap-1.5 mt-1">{[0, 1, 2].map(i => <div key={i} className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />)}</div>
+                            </>
+                        )}
                     </div>
                 )}
 
