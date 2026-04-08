@@ -19,9 +19,10 @@ interface Participant { id: string; name: string; role: string; micOn: boolean; 
 interface Permissions { mic: boolean; cam: boolean; screen: boolean; }
 
 // ── Phase types ───────────────────────────────────────────────────────────────
-// mentor:  'pre' → lobby → 'call'
-// student: 'pre' → waiting → (admitted) → lobby → 'call'
-type Phase = 'pre' | 'waiting' | 'lobby' | 'call';
+// mentor:  'lobby' → 'call'   (enters lobby immediately, no pre-screen)
+// student: 'lobby' → 'knocking' → (admitted) → 'call'
+//          if mentor not in call: lobby shows "waiting for host" overlay
+type Phase = 'lobby' | 'knocking' | 'call';
 
 const TURN_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -45,7 +46,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     const iceBufRef = useRef<RTCIceCandidateInit[]>([]);
     const remoteSetRef = useRef(false);
 
-    const [phase, setPhase] = useState<Phase>('pre');
+    const [phase, setPhase] = useState<Phase>('lobby');
     const [lobbyMic, setLobbyMic] = useState(true);
     const [lobbyCam, setLobbyCam] = useState(true);
     const [lobbyStream, setLobbyStream] = useState<MediaStream | null>(null);
@@ -100,15 +101,15 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         }
     }, [phase]);
 
-    // ── Lobby preview stream ──────────────────────────────────────────────
+    // ── Lobby preview stream — starts immediately for both roles ─────────
     useEffect(() => {
-        if (phase !== 'lobby') return;
+        if (phase !== 'lobby' && phase !== 'knocking') return;
         let s: MediaStream | null = null;
         navigator.mediaDevices.getUserMedia({ video: true, audio: true })
             .then(stream => { s = stream; setLobbyStream(stream); if (previewRef.current) previewRef.current.srcObject = stream; })
             .catch(() => setError('Camera/mic permission denied.'));
         return () => { s?.getTracks().forEach(t => t.stop()); if (previewRef.current) previewRef.current.srcObject = null; };
-    }, [phase]);
+    }, []);
 
     // ── Timer ─────────────────────────────────────────────────────────────
     useEffect(() => {
@@ -120,20 +121,16 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
     // ── Socket events (registered once) ───────────────────────────────────
     useEffect(() => {
-        // Meeting started by mentor (mentor opened lobby)
-        socket.on('meeting-started', ({ hostName }: { hostName: string }) => {
-            if (user.role === 'student') {
-                toast(`${hostName} started the meeting`, 'success');
-                // Don't move to lobby yet — student still needs to request join
-                // Just update UI to show "Request to Join" is now available
-            }
-        });
+        // Mentor auto-starts meeting when VideoPanel mounts
+        if (user.role === 'mentor') {
+            socket.emit('meeting-start', { sessionId });
+        }
 
-        // Mentor actually entered the call — student can now request join
+        // Mentor actually entered the call — student can now knock
         socket.on('mentor-in-call', () => {
             if (user.role === 'student') {
                 setMentorLive(true);
-                toast('Host joined the call — you can now request to join', 'success');
+                toast('Host joined — you can now ask to join', 'success');
             }
         });
 
@@ -141,36 +138,37 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         socket.on('mentor-left-call', () => {
             if (user.role === 'student') {
                 setMentorLive(false);
-                if (phase === 'waiting') {
-                    setPhase('pre');
+                if (phase === 'knocking') {
+                    setPhase('lobby');
                     toast('Host left the call', 'warn');
                 }
             }
         });
 
-        // Meeting not started yet
+        // Meeting not started yet (student tried to knock too early)
         socket.on('meeting-not-started', () => {
-            setPhase('pre');
+            setPhase('lobby');
             toast('Host has not started the meeting yet', 'warn');
         });
 
-        // Student: admitted by mentor
+        // Student: admitted by mentor → go straight to call
         socket.on('meeting-admitted', ({ permissions: perms }: { permissions: Permissions }) => {
             setPermissions(perms);
-            toast('✅ You were admitted to the call', 'success');
-            setPhase('lobby');
+            toast('✅ You were admitted', 'success');
+            // Stop lobby stream and join call
+            joinCall(perms);
         });
 
         // Student: denied by mentor
         socket.on('meeting-denied', () => {
             toast('❌ Your request to join was denied', 'warn');
-            setPhase('pre');
+            setPhase('lobby');
         });
 
-        // Mentor: someone is waiting
+        // Mentor: someone is knocking
         socket.on('participant-waiting', (p: { userId: string; name: string; socketId: string }) => {
             setWaitingRoom(prev => [...prev.filter(x => x.userId !== p.userId), p]);
-            toast(`✋ ${p.name} is waiting to join`, 'info');
+            toast(`🔔 ${p.name} is asking to join`, 'info');
         });
 
         // Permission changed by host
@@ -323,14 +321,15 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         setPhase('lobby');
     }
 
-    // ── Student: request to join ──────────────────────────────────────────
-    function handleRequestJoin() {
+    // ── Student: knock (ask to join) ──────────────────────────────────────
+    function handleKnock() {
         socket.emit('meeting-request-join', { sessionId });
-        setPhase('waiting');
+        setPhase('knocking');
     }
 
-    // ── Join call from lobby ──────────────────────────────────────────────
-    async function joinCall() {
+    // ── Join call ─────────────────────────────────────────────────────────
+    async function joinCall(admittedPerms?: Permissions) {
+        const perms = admittedPerms ?? permissions;
         lobbyStream?.getTracks().forEach(t => t.stop());
         setLobbyStream(null);
         setMicOn(lobbyMic);
@@ -340,14 +339,13 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 video: { width: { ideal: 1280 }, height: { ideal: 720 } },
                 audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
             });
-            stream.getAudioTracks().forEach(t => { t.enabled = lobbyMic && permissions.mic; });
-            stream.getVideoTracks().forEach(t => { t.enabled = lobbyCam && permissions.cam; });
+            stream.getAudioTracks().forEach(t => { t.enabled = lobbyMic && perms.mic; });
+            stream.getVideoTracks().forEach(t => { t.enabled = lobbyCam && perms.cam; });
             streamRef.current = stream;
             if (localRef.current) localRef.current.srcObject = stream;
             iceBufRef.current = []; remoteSetRef.current = false;
             await ensurePC();
             setPhase('call');
-            // Notify backend mentor is now live in the call
             if (user.role === 'mentor') {
                 socket.emit('mentor-joined-call', { sessionId });
                 await makeOffer();
@@ -478,61 +476,132 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         </div>
     );
 
-    // ── PRE-MEETING: mentor hasn't started yet ────────────────────────────
-    if (phase === 'pre') return (
-        <div className="flex flex-col items-center justify-center h-full gap-6 px-6" style={{ background: '#111827' }}>
-            <div className="w-16 h-16 rounded-2xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg,#7c3aed,#4f46e5)' }}>
-                <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><rect x="2" y="6" width="18" height="14" rx="3" stroke="white" strokeWidth="1.8" /><path d="M20 11l6-3v10l-6-3V11z" stroke="white" strokeWidth="1.8" strokeLinejoin="round" /></svg>
-            </div>
-            <div className="text-center">
-                <h2 className="text-white text-xl font-bold mb-1">{sessionTitle}</h2>
-                {user.role === 'mentor' ? (
-                    <p className="text-white/40 text-[13px]">You are the host. Start the meeting when ready.</p>
-                ) : mentorLive ? (
-                    <p className="text-white/40 text-[13px]">Host is in the call. Request to join when ready.</p>
-                ) : (
-                    <p className="text-white/40 text-[13px]">Waiting for host to start the meeting...</p>
-                )}
-            </div>
-            {user.role === 'mentor' ? (
-                <button onClick={handleStartMeeting}
-                    className="px-8 py-3 rounded-xl font-semibold text-[15px] text-white transition-all hover:scale-105"
-                    style={{ background: 'linear-gradient(135deg,#1a73e8,#1557b0)', boxShadow: '0 4px 20px rgba(26,115,232,0.4)' }}>
-                    Start Meeting
-                </button>
-            ) : mentorLive ? (
-                <button onClick={handleRequestJoin}
-                    className="px-8 py-3 rounded-xl font-semibold text-[15px] text-white transition-all hover:scale-105"
-                    style={{ background: 'linear-gradient(135deg,#1a73e8,#1557b0)', boxShadow: '0 4px 20px rgba(26,115,232,0.4)' }}>
-                    Request to Join
-                </button>
-            ) : (
-                <div className="flex flex-col items-center gap-3">
-                    <div className="flex gap-1.5">
-                        {[0, 1, 2].map(i => <div key={i} className="w-2 h-2 rounded-full bg-white/20 animate-bounce" style={{ animationDelay: `${i * 0.2}s` }} />)}
+    // ── LOBBY — camera preview for both mentor and student ────────────────
+    if (phase === 'lobby') return (
+        <div className="flex items-center justify-center h-full px-4" style={{ background: '#111827' }}>
+            <div className="flex flex-col lg:flex-row items-center gap-10 max-w-4xl w-full">
+
+                {/* Camera preview */}
+                <div className="relative rounded-2xl overflow-hidden flex-1 w-full max-w-lg" style={{ aspectRatio: '16/9', background: '#1f2937' }}>
+                    <video ref={previewRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+                    {!lobbyCam && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ background: '#1f2937' }}>
+                            <div className="w-24 h-24 rounded-full flex items-center justify-center text-4xl font-black" style={{ background: 'linear-gradient(135deg,#7c3aed,#4f46e5)' }}>{myInitial}</div>
+                            <p className="text-white/50 text-sm">Camera is off</p>
+                        </div>
+                    )}
+                    {/* Student: "Waiting for host" overlay */}
+                    {user.role === 'student' && !mentorLive && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(4px)' }}>
+                            <div className="flex gap-1.5">
+                                {[0, 1, 2].map(i => <div key={i} className="w-2.5 h-2.5 rounded-full bg-white/40 animate-bounce" style={{ animationDelay: `${i * 0.2}s` }} />)}
+                            </div>
+                            <p className="text-white font-semibold text-[15px]">Waiting for host to start</p>
+                            <p className="text-white/40 text-[12px]">You'll be able to join once the host starts the meeting</p>
+                        </div>
+                    )}
+                    {/* Mic/cam toggles */}
+                    <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex gap-2">
+                        <button onClick={() => { const n = !lobbyMic; setLobbyMic(n); lobbyStream?.getAudioTracks().forEach(t => { t.enabled = n; }); }}
+                            className="w-11 h-11 rounded-full flex items-center justify-center transition-all"
+                            style={{ background: lobbyMic ? 'rgba(255,255,255,0.18)' : '#ea4335', backdropFilter: 'blur(8px)' }}>
+                            {lobbyMic ? <MicIcon /> : <MicOffIcon size={16} />}
+                        </button>
+                        <button onClick={() => { const n = !lobbyCam; setLobbyCam(n); lobbyStream?.getVideoTracks().forEach(t => { t.enabled = n; }); }}
+                            className="w-11 h-11 rounded-full flex items-center justify-center transition-all"
+                            style={{ background: lobbyCam ? 'rgba(255,255,255,0.18)' : '#ea4335', backdropFilter: 'blur(8px)' }}>
+                            {lobbyCam ? <CamIcon /> : <CamOffIcon />}
+                        </button>
                     </div>
-                    <p className="text-white/20 text-[12px]">You'll be notified when the host starts</p>
                 </div>
-            )}
-            <button onClick={onLeave} className="text-sm text-white/30 hover:text-white/60 transition-colors">← Back to editor</button>
+
+                {/* Right panel */}
+                <div className="flex flex-col gap-5 w-full max-w-xs">
+                    <div>
+                        <h2 className="text-white text-2xl font-bold">{sessionTitle}</h2>
+                        <p className="text-white/40 text-sm mt-1 capitalize">{user.role}</p>
+                    </div>
+                    <div className="flex flex-col gap-2 text-[13px] text-white/50">
+                        <span className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full" style={{ background: lobbyMic ? '#10b981' : '#ef4444' }} />
+                            Microphone {lobbyMic ? 'on' : 'off'}
+                        </span>
+                        <span className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full" style={{ background: lobbyCam ? '#10b981' : '#ef4444' }} />
+                            Camera {lobbyCam ? 'on' : 'off'}
+                        </span>
+                    </div>
+                    {error && <p className="text-red-400 text-sm">{error}</p>}
+
+                    {user.role === 'mentor' ? (
+                        /* Mentor: join now directly */
+                        <button onClick={() => joinCall()}
+                            className="w-full py-3 rounded-xl font-semibold text-[15px] text-white transition-all hover:scale-[1.02] active:scale-95"
+                            style={{ background: 'linear-gradient(135deg,#1a73e8,#1557b0)', boxShadow: '0 4px 20px rgba(26,115,232,0.4)' }}>
+                            Join now
+                        </button>
+                    ) : mentorLive ? (
+                        /* Student: host is live, can knock */
+                        <button onClick={handleKnock}
+                            className="w-full py-3 rounded-xl font-semibold text-[15px] text-white transition-all hover:scale-[1.02] active:scale-95"
+                            style={{ background: 'linear-gradient(135deg,#1a73e8,#1557b0)', boxShadow: '0 4px 20px rgba(26,115,232,0.4)' }}>
+                            Ask to join
+                        </button>
+                    ) : (
+                        /* Student: host not in call yet */
+                        <button disabled
+                            className="w-full py-3 rounded-xl font-semibold text-[15px] text-white/30 cursor-not-allowed"
+                            style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}>
+                            Waiting for host...
+                        </button>
+                    )}
+                    <button onClick={onLeave} className="text-sm text-white/30 hover:text-white/60 transition-colors text-center">← Back to editor</button>
+                </div>
+            </div>
         </div>
     );
 
-    // ── WAITING ROOM: student waiting for admission ───────────────────────
-    if (phase === 'waiting') return (
-        <div className="flex flex-col items-center justify-center h-full gap-5" style={{ background: '#111827' }}>
-            <div className="w-16 h-16 rounded-full flex items-center justify-center" style={{ background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.3)' }}>
-                <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><circle cx="14" cy="14" r="11" stroke="#fcd34d" strokeWidth="1.8" strokeOpacity="0.5" /><path d="M14 8v6l4 2" stroke="#fcd34d" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+    // ── KNOCKING — student waiting for admission ──────────────────────────
+    if (phase === 'knocking') return (
+        <div className="flex items-center justify-center h-full px-4" style={{ background: '#111827' }}>
+            <div className="flex flex-col lg:flex-row items-center gap-10 max-w-4xl w-full">
+                {/* Camera preview still visible while knocking */}
+                <div className="relative rounded-2xl overflow-hidden flex-1 w-full max-w-lg" style={{ aspectRatio: '16/9', background: '#1f2937' }}>
+                    <video ref={previewRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+                    {!lobbyCam && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ background: '#1f2937' }}>
+                            <div className="w-24 h-24 rounded-full flex items-center justify-center text-4xl font-black" style={{ background: 'linear-gradient(135deg,#0891b2,#0e7490)' }}>{myInitial}</div>
+                        </div>
+                    )}
+                    {/* Knocking overlay */}
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(2px)' }}>
+                        <div className="w-14 h-14 rounded-full flex items-center justify-center" style={{ background: 'rgba(245,158,11,0.2)', border: '1px solid rgba(245,158,11,0.4)' }}>
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M18 8h1a4 4 0 0 1 0 8h-1M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8zM6 1v3M10 1v3M14 1v3" stroke="#fcd34d" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                        </div>
+                        <p className="text-white font-semibold text-[15px]">Asking to join...</p>
+                        <p className="text-white/40 text-[12px]">Waiting for the host to let you in</p>
+                        <div className="flex gap-1.5 mt-1">
+                            {[0, 1, 2].map(i => <div key={i} className="w-2 h-2 rounded-full bg-amber-400/60 animate-bounce" style={{ animationDelay: `${i * 0.2}s` }} />)}
+                        </div>
+                    </div>
+                </div>
+                <div className="flex flex-col gap-4 w-full max-w-xs">
+                    <h2 className="text-white text-xl font-bold">{sessionTitle}</h2>
+                    <p className="text-white/40 text-[13px]">The host will admit you shortly. Your camera and mic are ready.</p>
+                    <button onClick={() => setPhase('lobby')}
+                        className="w-full py-2.5 rounded-xl text-[14px] font-medium text-white/60 hover:text-white transition-colors"
+                        style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}>
+                        Cancel request
+                    </button>
+                </div>
             </div>
-            <div className="text-center">
-                <h3 className="text-white text-lg font-semibold mb-1">Waiting to be admitted</h3>
-                <p className="text-white/40 text-[13px]">The host will let you in soon.</p>
-            </div>
+        </div>
+    );
             <div className="flex gap-1.5">
                 {[0, 1, 2].map(i => <div key={i} className="w-2 h-2 rounded-full bg-amber-400/60 animate-bounce" style={{ animationDelay: `${i * 0.2}s` }} />)}
             </div>
             <button onClick={() => setPhase('pre')} className="text-sm text-white/30 hover:text-white/60 transition-colors">Cancel</button>
-        </div>
+        </div >
     );
 
     // ── LOBBY ─────────────────────────────────────────────────────────────
