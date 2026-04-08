@@ -101,13 +101,18 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             })
             .catch(() => setError('Camera/mic permission denied'));
         return () => {
-            s?.getTracks().forEach(t => t.stop());
-            setPreviewStream(null);
-            if (previewRef.current) previewRef.current.srcObject = null;
+            // Only stop tracks when unmounting, not on every phase change
+            // enterCall will reuse this stream
         };
-    }, [phase === 'call']); // only stop when entering call
+    }, []); // run once on mount only
 
-    // ── Timer ─────────────────────────────────────────────────────────────
+    // ── Cleanup on unmount ────────────────────────────────────────────────
+    useEffect(() => {
+        return () => {
+            localStream.current?.getTracks().forEach(t => t.stop());
+            pcRef.current?.close();
+        };
+    }, []);
     useEffect(() => {
         if (phase !== 'call') return;
         resetHide();
@@ -205,44 +210,58 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         const cam = perms ? perms.cam : true;
         const curMic = previewMicRef.current;
         const curCam = previewCamRef.current;
-        // Stop preview stream
-        previewStream?.getTracks().forEach(t => t.stop());
-        setPreviewStream(null);
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-            });
-            // Apply toggle + permission state
-            stream.getAudioTracks().forEach(t => { t.enabled = curMic && mic; });
-            stream.getVideoTracks().forEach(t => { t.enabled = curCam && cam; });
-            setMicOn(curMic && mic);
-            setCamOn(curCam && cam);
-            // Store stream BEFORE creating PC so tracks can be added
-            localStream.current = stream;
-            iceBuf.current = [];
-            remoteReady.current = false;
-            // Create PC then explicitly add all tracks
-            const pc = createPC();
-            stream.getTracks().forEach(t => {
-                if (!pc.getSenders().find(s => s.track === t)) {
-                    pc.addTrack(t, stream);
-                }
-            });
-            // Show call UI
-            setPhase('call');
-            // Set local video element
-            if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-            if (user.role === 'mentor') {
-                socket.emit('mentor-joined-call', { sessionId });
-                await sendOffer();
-            } else {
-                socket.emit('peer-ready', { sessionId });
+
+        // Reuse the preview stream — don't stop it and request again
+        // This avoids "camera in use" / permission denied errors
+        let stream = previewStream;
+
+        if (!stream) {
+            // No preview stream (e.g. permission was denied earlier, retry)
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+                });
+            } catch (e: any) {
+                setError(`Camera/mic error: ${e.message}`);
+                return;
             }
-            setParticipants([{ id: user.id, name: user.name, role: user.role, micOn: curMic && mic, camOn: curCam && cam }]);
-        } catch (e: any) {
-            setError(`Camera/mic error: ${e.message}`);
         }
+
+        // Detach from preview element
+        if (previewRef.current) previewRef.current.srcObject = null;
+        setPreviewStream(null);
+
+        // Apply toggle + permission state to existing tracks
+        stream.getAudioTracks().forEach(t => { t.enabled = curMic && mic; });
+        stream.getVideoTracks().forEach(t => { t.enabled = curCam && cam; });
+        setMicOn(curMic && mic);
+        setCamOn(curCam && cam);
+
+        // Store stream BEFORE creating PC so tracks can be added
+        localStream.current = stream;
+        iceBuf.current = [];
+        remoteReady.current = false;
+
+        // Create PC then explicitly add all tracks
+        const pc = createPC();
+        stream.getTracks().forEach(t => {
+            if (!pc.getSenders().find(s => s.track === t)) {
+                pc.addTrack(t, stream!);
+            }
+        });
+
+        // Show call UI
+        setPhase('call');
+        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+
+        if (user.role === 'mentor') {
+            socket.emit('mentor-joined-call', { sessionId });
+            await sendOffer();
+        } else {
+            socket.emit('peer-ready', { sessionId });
+        }
+        setParticipants([{ id: user.id, name: user.name, role: user.role, micOn: curMic && mic, camOn: curCam && cam }]);
     }, [previewStream, createPC, sendOffer, socket, sessionId, user]);
 
     // ── Keep enterCall ref current so socket handler always calls latest ──
