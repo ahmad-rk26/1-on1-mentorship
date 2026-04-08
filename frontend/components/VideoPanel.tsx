@@ -66,7 +66,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [waiting, setWaiting] = useState<WaitingEntry[]>([]);
     const [mentorLive, setMentorLive] = useState(false);
-    const [peerDisplayName, setPeerDisplayName] = useState(peerName);
+    const [peerDisplayName, setPeerDisplayName] = useState(''); // only set after admit
     const [toasts, setToasts] = useState<Toast[]>([]);
     const [pip, setPip] = useState({ right: 16, bottom: 80 });
     const [error, setError] = useState('');
@@ -167,17 +167,20 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             }
         };
         pc.ontrack = ({ streams, track }) => {
-            // Always use the latest stream
-            const stream = streams[0];
-            if (stream) {
+            if (!remoteStream.current) {
+                // First time — use the stream directly
+                const stream = streams[0] || new MediaStream([track]);
                 remoteStream.current = stream;
                 if (remoteVideoRef.current) {
                     remoteVideoRef.current.srcObject = stream;
                     remoteVideoRef.current.play().catch(() => { });
                 }
-            } else if (remoteStream.current) {
-                // replaceTrack sends track without a stream — add to existing stream
+            } else {
+                // Renegotiation (e.g. screen share) — replace the track in existing stream
+                const existing = remoteStream.current.getTracks().find(t => t.kind === track.kind);
+                if (existing) remoteStream.current.removeTrack(existing);
                 remoteStream.current.addTrack(track);
+                // Re-assign srcObject to force video element to pick up new track
                 if (remoteVideoRef.current) {
                     remoteVideoRef.current.srcObject = remoteStream.current;
                     remoteVideoRef.current.play().catch(() => { });
@@ -423,8 +426,6 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         if (!screenAllowed && user.role !== 'mentor') { addToast('🖥️ Host has not allowed screen sharing', 'warn'); return; }
         if (screenShare) { stopScreenShare(); return; }
         try {
-            // Request screen capture — audio is optional (user checks "Share tab audio" in browser)
-            // Do NOT force audio:true as it can cause blank video on some browsers/OS
             const screen = await (navigator.mediaDevices as any).getDisplayMedia({
                 video: { cursor: 'always', frameRate: { ideal: 30 } },
                 audio: { echoCancellation: false, noiseSuppression: false },
@@ -434,16 +435,17 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
             const pc = pcRef.current;
             if (!pc) { addToast('Not in call', 'warn'); return; }
 
-            // Replace existing video sender (no renegotiation needed)
             const vSender = pc.getSenders().find(s => s.track?.kind === 'video');
             if (vSender) {
+                // replaceTrack swaps the track but remote ontrack won't fire
+                // So we also need to renegotiate to force remote to update
                 await vSender.replaceTrack(vTrack);
+                await sendOffer(); // force renegotiation so remote ontrack fires
             } else {
                 pc.addTrack(vTrack, screen);
-                await sendOffer(); // renegotiate only if adding new sender
+                await sendOffer();
             }
 
-            // Add screen audio if captured (separate sender, needs renegotiation)
             if (aTrack) {
                 pc.addTrack(aTrack, screen);
                 await sendOffer();
@@ -451,7 +453,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
             vTrack.onended = () => stopScreenShare();
             setScreenShare(true);
-            addToast(aTrack ? '📺 Sharing screen with audio' : '📺 Sharing screen (check "Share tab audio" for audio)');
+            addToast(aTrack ? '📺 Sharing screen with audio' : '📺 Sharing screen');
         } catch (e: any) {
             if (e.name !== 'NotAllowedError') addToast('Screen share failed: ' + e.message, 'warn');
         }
