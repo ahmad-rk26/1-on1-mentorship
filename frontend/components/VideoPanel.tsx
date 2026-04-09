@@ -531,8 +531,10 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
     const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
     const myInitial = user.name.charAt(0).toUpperCase();
-    const displayName = peerDisplayName || peerName || peerRole;
-    const peerInitial = displayName.charAt(0).toUpperCase();
+    // Only show peer name after they've been admitted (peerDisplayName set in admitUser)
+    // peerName prop is available earlier but we don't want to show it before admission
+    const displayName = peerDisplayName || (remoteOn ? peerName : '') || peerRole;
+    const peerInitial = (peerDisplayName || peerName || peerRole).charAt(0).toUpperCase();
 
     // ── SESSION ENDED ─────────────────────────────────────────────────────
     if (ended) return (
@@ -648,26 +650,25 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 {!remoteOn && (
                     <div className="flex flex-col items-center gap-4">
                         {peerLeft ? (
-                            // Peer was in call but left
                             <>
                                 <div className="w-20 h-20 rounded-full flex items-center justify-center" style={{ background: 'rgba(255,255,255,0.06)' }}>
                                     <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><path d="M4 16c0-6.627 5.373-12 12-12s12 5.373 12 12" stroke="white" strokeWidth="2" strokeLinecap="round" strokeOpacity="0.4" /><rect x="10" y="19" width="12" height="6" rx="3" fill="white" fillOpacity="0.4" /></svg>
                                 </div>
-                                <p className="text-white/60 text-lg font-medium">{displayName || 'Participant'} left</p>
+                                <p className="text-white/60 text-lg font-medium">{peerDisplayName || peerName || 'Participant'} left</p>
                                 <p className="text-white/30 text-sm">No one else is in the call</p>
                             </>
-                        ) : displayName ? (
-                            // Peer admitted but camera off
+                        ) : peerDisplayName ? (
+                            // Admitted but camera off — only show name after explicit admit
                             <>
                                 <div className="w-32 h-32 rounded-full flex items-center justify-center text-5xl font-bold text-white"
                                     style={{ background: peerRole === 'mentor' ? '#7c3aed' : '#0891b2' }}>
-                                    {peerInitial}
+                                    {peerDisplayName.charAt(0).toUpperCase()}
                                 </div>
-                                <p className="text-white text-xl font-medium">{displayName}</p>
+                                <p className="text-white text-xl font-medium">{peerDisplayName}</p>
                                 <p className="text-white/40 text-sm">Camera is off</p>
                             </>
                         ) : (
-                            // No one yet
+                            // No one admitted yet — don't show any name
                             <>
                                 <div className="w-20 h-20 rounded-full flex items-center justify-center" style={{ background: 'rgba(255,255,255,0.06)' }}>
                                     <PeopleIcon />
