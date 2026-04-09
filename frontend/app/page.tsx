@@ -92,7 +92,7 @@ export default function Home() {
     <div className="min-h-screen text-white overflow-x-hidden" style={{ background: 'var(--bg)' }}>
 
       {/* ── Navbar ─────────────────────────────────────────────────────────── */}
-      <nav className="fixed top-0 inset-x-0 z-50 h-16 flex items-center px-6 md:px-10"
+      <nav className="fixed top-0 inset-x-0 z-50 h-16 flex items-center px-4 md:px-10"
         style={{ background: 'rgba(8,11,20,0.8)', backdropFilter: 'blur(20px)', borderBottom: '1px solid var(--border)' }}>
         <div className="flex items-center gap-2.5 mr-auto">
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center text-xs font-black">M</div>
@@ -300,7 +300,7 @@ export default function Home() {
               </div>
 
               {/* Chat sidebar */}
-              <div className="w-52 shrink-0 flex flex-col" style={{ borderLeft: '1px solid var(--border)' }}>
+              <div className="hidden sm:flex w-44 lg:w-52 shrink-0 flex-col" style={{ borderLeft: '1px solid var(--border)' }}>
                 <div className="px-4 py-3 text-[11px] font-semibold tracking-widest uppercase text-[var(--muted)]"
                   style={{ borderBottom: '1px solid var(--border)' }}>
                   Chat

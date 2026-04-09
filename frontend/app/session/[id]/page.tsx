@@ -114,6 +114,7 @@ export default function SessionPage() {
     const [openTabs, setOpenTabs] = useState<FileNode[]>([]);
     const [activeFileId, setActiveFileId] = useState<string | null>(null);
     const [sidebarOpen, setSidebarOpen] = useState(true);
+    const [mobileChatOpen, setMobileChatOpen] = useState(false);
 
     // ── Run code state ────────────────────────────────────────────────────
     const [output, setOutput] = useState('');
@@ -367,7 +368,7 @@ export default function SessionPage() {
     );
 
     return (
-        <div className="flex flex-col h-screen" style={{ background: '#0d1117' }}>
+        <div className="flex flex-col h-screen relative" style={{ background: '#0d1117' }}>
 
             {/* ── Title bar (VS Code style) ─────────────────────────────── */}
             <div className="flex items-center justify-between px-3 h-10 shrink-0"
@@ -405,11 +406,18 @@ export default function SessionPage() {
                     ))}
                 </div>
                 {/* Right */}
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-1.5 shrink-0">
                     <button onClick={copyLink}
                         className="flex items-center gap-1.5 text-[12px] px-2.5 py-1 rounded-lg transition-all"
                         style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: copied ? '#6ee7b7' : '#7d8590' }}>
-                        {copied ? '✓ Copied' : '⎘ Share'}
+                        {copied ? '✓' : '⎘'} <span className="hidden sm:inline">{copied ? 'Copied' : 'Share'}</span>
+                    </button>
+                    {/* Mobile chat toggle */}
+                    <button onClick={() => setMobileChatOpen(p => !p)}
+                        className="md:hidden w-7 h-7 rounded flex items-center justify-center transition-colors"
+                        style={{ color: mobileChatOpen ? '#a78bfa' : '#7d8590', background: mobileChatOpen ? 'rgba(124,58,237,0.15)' : 'transparent' }}
+                        title="Toggle Chat">
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 2h12v8H8l-3 2V10H1V2z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" /></svg>
                     </button>
                     {user.role === 'mentor' && (
                         <button onClick={handleEndSession}
@@ -417,7 +425,8 @@ export default function SessionPage() {
                             style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)', color: '#fca5a5' }}
                             onMouseEnter={e => (e.currentTarget.style.background = 'rgba(239,68,68,0.18)')}
                             onMouseLeave={e => (e.currentTarget.style.background = 'rgba(239,68,68,0.1)')}>
-                            End Session
+                            <span className="hidden sm:inline">End Session</span>
+                            <span className="sm:hidden">End</span>
                         </button>
                     )}
                 </div>
@@ -428,7 +437,7 @@ export default function SessionPage() {
 
                 {/* ── File Explorer sidebar ── */}
                 {activeTab === 'editor' && sidebarOpen && (
-                    <div className="w-52 shrink-0 flex flex-col" style={{ borderRight: '1px solid rgba(255,255,255,0.06)' }}>
+                    <div className="w-44 sm:w-52 shrink-0 flex flex-col" style={{ borderRight: '1px solid rgba(255,255,255,0.06)' }}>
                         <FileExplorer
                             tree={tree}
                             activeFileId={activeFileId}
@@ -571,13 +580,20 @@ export default function SessionPage() {
                     )}
                 </div>
 
-                {/* ── Chat sidebar ── */}
-                <div className="w-64 shrink-0 flex flex-col" style={{ borderLeft: '1px solid rgba(255,255,255,0.06)' }}>
+                {/* ── Chat sidebar — hidden on mobile, visible md+ ── */}
+                <div className="hidden md:flex w-56 lg:w-64 shrink-0 flex-col" style={{ borderLeft: '1px solid rgba(255,255,255,0.06)' }}>
                     {socketRef.current && (
                         <ChatPanel sessionId={id} messages={messages} user={user} socket={socketRef.current} />
                     )}
                 </div>
             </div>
+
+            {/* ── Mobile chat overlay ── */}
+            {mobileChatOpen && socketRef.current && (
+                <div className="md:hidden absolute inset-x-0 bottom-6 z-40 flex flex-col" style={{ top: 40, background: 'var(--surface)' }}>
+                    <ChatPanel sessionId={id} messages={messages} user={user} socket={socketRef.current} />
+                </div>
+            )}
 
             {/* ── Status bar (VS Code style) ─────────────────────────────── */}
             <div className="flex items-center justify-between px-4 h-6 shrink-0 text-[11px]"

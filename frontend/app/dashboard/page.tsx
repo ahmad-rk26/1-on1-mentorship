@@ -286,7 +286,7 @@ export default function Dashboard() {
                             {sessions.map(s => {
                                 const st = STATUS_STYLES[s.status] || STATUS_STYLES.ended;
                                 return (
-                                    <div key={s.id} className="flex items-center gap-4 px-5 py-4 rounded-2xl transition-all duration-150 group"
+                                    <div key={s.id} className="flex items-center gap-3 px-4 py-4 rounded-2xl transition-all duration-150 group"
                                         style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
                                         onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--border-hover)')}
                                         onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border)')}>
@@ -301,8 +301,8 @@ export default function Dashboard() {
                                                 {s.mentor_name} → {s.student_name || 'waiting for student'}
                                             </p>
                                         </Link>
-                                        <div className="flex items-center gap-2 shrink-0">
-                                            <span className="flex items-center gap-1.5 text-[12px] px-2.5 py-1 rounded-full"
+                                        <div className="flex items-center gap-1.5 shrink-0">
+                                            <span className="hidden sm:flex items-center gap-1.5 text-[12px] px-2.5 py-1 rounded-full"
                                                 style={{ background: st.bg, color: st.text }}>
                                                 <span className="w-1.5 h-1.5 rounded-full" style={{ background: st.dot }} />
                                                 {s.status}

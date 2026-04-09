@@ -67,8 +67,9 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     const [waiting, setWaiting] = useState<WaitingEntry[]>([]);
     const [mentorLive, setMentorLive] = useState(false);
     const [peerDisplayName, setPeerDisplayName] = useState(''); // only set after admit
-    const [peerLeft, setPeerLeft] = useState(false); // peer was in call but left
-    const [admitPrompt, setAdmitPrompt] = useState<WaitingEntry | null>(null); // Google Meet-style admit popup
+    const [peerLeft, setPeerLeft] = useState(false);
+    const [admitPrompt, setAdmitPrompt] = useState<WaitingEntry | null>(null);
+    const [inCallMsgs, setInCallMsgs] = useState<{ name: string; text: string; mine: boolean }[]>([]);
     const [toasts, setToasts] = useState<Toast[]>([]);
     const [pip, setPip] = useState({ right: 16, bottom: 80 });
     const [error, setError] = useState('');
@@ -344,6 +345,10 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         });
         socket.on('hand-lowered', () => setPeerHandUp(false));
 
+        socket.on('incall-message', ({ name, text }: { name: string; text: string }) => {
+            setInCallMsgs(p => [...p, { name, text, mine: false }]);
+        });
+
         // WebRTC
         socket.on('webrtc-offer', async ({ offer }: { offer: RTCSessionDescriptionInit }) => {
             const pc = createPC();
@@ -392,7 +397,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         return () => {
             ['mentor-in-call', 'mentor-left-call', 'meeting-not-started', 'meeting-admitted',
                 'meeting-denied', 'participant-waiting', 'permission-changed', 'call-ended',
-                'session-ended', 'host-remove-me', 'hand-raised', 'hand-lowered',
+                'session-ended', 'host-remove-me', 'hand-raised', 'hand-lowered', 'incall-message',
                 'webrtc-offer', 'webrtc-answer', 'webrtc-ice-candidate', 'peer-ready',
             ].forEach(e => socket.off(e));
         };
@@ -549,7 +554,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     // ── LOBBY / KNOCK — Google Meet pre-join screen ───────────────────────
     if (phase === 'lobby' || phase === 'knock') return (
         <div className="flex items-center justify-center h-full" style={{ background: '#202124' }}>
-            <div className="flex flex-col lg:flex-row items-center gap-12 px-6 max-w-4xl w-full">
+            <div className="flex flex-col lg:flex-row items-center gap-6 lg:gap-12 px-4 sm:px-6 max-w-4xl w-full">
 
                 {/* Camera preview */}
                 <div className="relative rounded-2xl overflow-hidden w-full max-w-lg flex-1" style={{ aspectRatio: '16/9', background: '#3c4043' }}>
@@ -726,7 +731,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 </div>
 
                 {/* Bottom control bar */}
-                <div className="absolute bottom-0 inset-x-0 flex items-center justify-between px-6 py-4 transition-all duration-300"
+                <div className="absolute bottom-0 inset-x-0 flex items-center justify-between px-4 sm:px-6 py-4 transition-all duration-300"
                     style={{ background: 'linear-gradient(to top,rgba(0,0,0,0.8),transparent)', opacity: showCtrl ? 1 : 0, pointerEvents: showCtrl ? 'auto' : 'none', transform: showCtrl ? 'translateY(0)' : 'translateY(8px)' }}>
 
                     {/* Left — time + role */}
@@ -745,17 +750,19 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                         <CtrlBtn active={!handUp} onClick={toggleHand}
                             icon={<HandIcon />} label={handUp ? 'Lower hand' : 'Raise hand'}
                             activeColor={handUp ? '#fbbc04' : undefined} />
-                        <CtrlBtn active={!screenShare} onClick={toggleScreenShare}
-                            icon={<ScreenIcon />} label={screenShare ? 'Stop share' : 'Present'}
-                            activeColor={screenShare ? '#34a853' : undefined}
-                            locked={!screenAllowed && user.role !== 'mentor'} />
+                        <div className="hidden sm:block">
+                            <CtrlBtn active={!screenShare} onClick={toggleScreenShare}
+                                icon={<ScreenIcon />} label={screenShare ? 'Stop share' : 'Present'}
+                                activeColor={screenShare ? '#34a853' : undefined}
+                                locked={!screenAllowed && user.role !== 'mentor'} />
+                        </div>
 
                         {/* End / Leave */}
                         <button onClick={e => { e.stopPropagation(); user.role === 'mentor' ? setShowEndModal(true) : handleLeave(); }}
-                            className="flex items-center gap-2 px-6 py-3 rounded-full font-medium text-[14px] text-white transition-all hover:opacity-90"
+                            className="flex items-center gap-2 px-4 sm:px-6 py-3 rounded-full font-medium text-[14px] text-white transition-all hover:opacity-90"
                             style={{ background: '#ea4335' }}>
                             <HangupIcon />
-                            {user.role === 'mentor' ? 'End call' : 'Leave call'}
+                            <span className="hidden sm:inline">{user.role === 'mentor' ? 'End call' : 'Leave call'}</span>
                         </button>
                     </div>
 
@@ -771,7 +778,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
             {/* Side panel */}
             {sidePanel && (
-                <div className="w-80 shrink-0 flex flex-col" style={{ background: '#292b2f', borderLeft: '1px solid rgba(255,255,255,0.08)' }}>
+                <div className="w-full sm:w-80 shrink-0 flex flex-col absolute sm:relative inset-0 sm:inset-auto z-30 sm:z-auto" style={{ background: '#292b2f', borderLeft: '1px solid rgba(255,255,255,0.08)' }}>
                     <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
                         <span className="text-white font-medium text-[15px]">{sidePanel === 'people' ? 'People' : 'In-call messages'}</span>
                         <button onClick={() => setSidePanel(null)} className="text-white/40 hover:text-white text-xl leading-none">✕</button>
@@ -821,7 +828,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                             ))}
                         </div>
                     )}
-                    {sidePanel === 'chat' && <InCallChat socket={socket} sessionId={sessionId} userName={user.name} />}
+                    {sidePanel === 'chat' && <InCallChat socket={socket} sessionId={sessionId} userName={user.name} msgs={inCallMsgs} onSend={msg => setInCallMsgs(p => [...p, msg])} />}
                 </div>
             )}
 
@@ -848,8 +855,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
             {/* Google Meet-style admit popup */}
             {admitPrompt && user.role === 'mentor' && (
-                <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-3 rounded-2xl shadow-2xl"
-                    style={{ background: '#292b2f', border: '1px solid rgba(255,255,255,0.15)', backdropFilter: 'blur(12px)', minWidth: 300 }}>
+                <div className="absolute bottom-24 left-4 right-4 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-50 flex items-center gap-3 px-4 py-3 rounded-2xl shadow-2xl"
+                    style={{ background: '#292b2f', border: '1px solid rgba(255,255,255,0.15)', backdropFilter: 'blur(12px)', minWidth: 280 }}>
                     <div className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold text-white shrink-0" style={{ background: '#0891b2' }}>
                         {admitPrompt.name.charAt(0).toUpperCase()}
                     </div>
@@ -884,19 +891,18 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 }
 
 // ── In-call chat ──────────────────────────────────────────────────────────────
-function InCallChat({ socket, sessionId, userName }: { socket: Socket; sessionId: string; userName: string }) {
-    const [msgs, setMsgs] = useState<{ name: string; text: string; mine: boolean }[]>([]);
+function InCallChat({ socket, sessionId, userName, msgs, onSend }: {
+    socket: Socket; sessionId: string; userName: string;
+    msgs: { name: string; text: string; mine: boolean }[];
+    onSend: (msg: { name: string; text: string; mine: boolean }) => void;
+}) {
     const [input, setInput] = useState('');
     const bottomRef = useRef<HTMLDivElement>(null);
-    useEffect(() => {
-        socket.on('incall-message', ({ name, text }: { name: string; text: string }) => setMsgs(p => [...p, { name, text, mine: false }]));
-        return () => { socket.off('incall-message'); };
-    }, [socket]);
     useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs]);
     function send(e: React.FormEvent) {
         e.preventDefault(); if (!input.trim()) return;
         socket.emit('incall-message', { sessionId, name: userName, text: input.trim() });
-        setMsgs(p => [...p, { name: userName, text: input.trim(), mine: true }]);
+        onSend({ name: userName, text: input.trim(), mine: true });
         setInput('');
     }
     return (
