@@ -67,6 +67,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     const [waiting, setWaiting] = useState<WaitingEntry[]>([]);
     const [mentorLive, setMentorLive] = useState(false);
     const [peerDisplayName, setPeerDisplayName] = useState(''); // only set after admit
+    const [peerLeft, setPeerLeft] = useState(false); // peer was in call but left
+    const [admitPrompt, setAdmitPrompt] = useState<WaitingEntry | null>(null); // Google Meet-style admit popup
     const [toasts, setToasts] = useState<Toast[]>([]);
     const [pip, setPip] = useState({ right: 16, bottom: 80 });
     const [error, setError] = useState('');
@@ -153,6 +155,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         pc.onconnectionstatechange = () => {
             if (pc.connectionState === 'connected') {
                 setConnStatus('connected');
+                setPeerLeft(false);
                 addToast(`📞 Connected`, 'success');
                 setParticipants(prev =>
                     prev.find(p => p.role === peerRole) ? prev :
@@ -163,7 +166,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 setConnStatus('connecting');
                 setRemoteOn(false);
                 setParticipants(prev => prev.filter(p => p.role !== peerRole));
-                addToast(`${displayName} left the call`, 'warn');
+                setPeerLeft(true);
+                addToast(`${displayName || peerRole} left the call`, 'warn');
             }
         };
         pc.ontrack = ({ streams, track }) => {
@@ -304,8 +308,8 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
         socket.on('participant-waiting', (p: WaitingEntry) => {
             setWaiting(prev => [...prev.filter(x => x.userId !== p.userId), p]);
-            // Don't set peerDisplayName here — only show name after student is admitted
-            addToast(`🔔 Someone is asking to join`, 'info');
+            setAdmitPrompt(p); // show Google Meet-style admit popup with name
+            addToast(`🔔 ${p.name} wants to join`, 'info');
         });
 
         socket.on('permission-changed', ({ permission, value, by }: { permission: string; value: boolean; by: string }) => {
@@ -484,16 +488,17 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
         cleanup(); setShowEndModal(false); onEndSession?.();
     }
     function admitUser(socketId: string, userId: string) {
-        // Set the peer name when admitting so it shows correctly in the call
         const entry = waiting.find(w => w.socketId === socketId);
         if (entry) setPeerDisplayName(entry.name);
         socket.emit('meeting-admit', { sessionId, socketId, userId });
         setWaiting(p => p.filter(x => x.socketId !== socketId));
+        setAdmitPrompt(null);
         addToast('✅ Admitted', 'success');
     }
     function denyUser(socketId: string) {
         socket.emit('meeting-deny', { sessionId, socketId });
         setWaiting(p => p.filter(x => x.socketId !== socketId));
+        setAdmitPrompt(null);
     }
     function setPermission(targetUserId: string, permission: string, value: boolean) {
         socket.emit('host-set-permission', { sessionId, targetUserId, permission, value });
@@ -638,16 +643,35 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                 {/* No remote yet */}
                 {!remoteOn && (
                     <div className="flex flex-col items-center gap-4">
-                        <div className="w-32 h-32 rounded-full flex items-center justify-center text-5xl font-bold text-white"
-                            style={{ background: peerRole === 'mentor' ? '#7c3aed' : '#0891b2' }}>
-                            {peerInitial}
-                        </div>
-                        <p className="text-white text-xl font-medium">{displayName}</p>
-                        <p className="text-white/40 text-sm">
-                            {connStatus === 'connecting' ? 'Waiting to join...' : 'Camera is off'}
-                        </p>
-                        {connStatus === 'connecting' && (
-                            <div className="flex gap-1.5 mt-1">{[0, 1, 2].map(i => <div key={i} className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />)}</div>
+                        {peerLeft ? (
+                            // Peer was in call but left
+                            <>
+                                <div className="w-20 h-20 rounded-full flex items-center justify-center" style={{ background: 'rgba(255,255,255,0.06)' }}>
+                                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><path d="M4 16c0-6.627 5.373-12 12-12s12 5.373 12 12" stroke="white" strokeWidth="2" strokeLinecap="round" strokeOpacity="0.4" /><rect x="10" y="19" width="12" height="6" rx="3" fill="white" fillOpacity="0.4" /></svg>
+                                </div>
+                                <p className="text-white/60 text-lg font-medium">{displayName || 'Participant'} left</p>
+                                <p className="text-white/30 text-sm">No one else is in the call</p>
+                            </>
+                        ) : displayName ? (
+                            // Peer admitted but camera off
+                            <>
+                                <div className="w-32 h-32 rounded-full flex items-center justify-center text-5xl font-bold text-white"
+                                    style={{ background: peerRole === 'mentor' ? '#7c3aed' : '#0891b2' }}>
+                                    {peerInitial}
+                                </div>
+                                <p className="text-white text-xl font-medium">{displayName}</p>
+                                <p className="text-white/40 text-sm">Camera is off</p>
+                            </>
+                        ) : (
+                            // No one yet
+                            <>
+                                <div className="w-20 h-20 rounded-full flex items-center justify-center" style={{ background: 'rgba(255,255,255,0.06)' }}>
+                                    <PeopleIcon />
+                                </div>
+                                <p className="text-white/50 text-lg">No one else is here</p>
+                                <p className="text-white/30 text-sm">Waiting for others to join...</p>
+                                <div className="flex gap-1.5 mt-1">{[0, 1, 2].map(i => <div key={i} className="w-2 h-2 rounded-full bg-white/20 animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />)}</div>
+                            </>
                         )}
                     </div>
                 )}
@@ -814,6 +838,30 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
                             <button onClick={() => setShowEndModal(false)} className="w-full py-2.5 text-[13px] text-white/40 hover:text-white/70 transition-colors">Cancel</button>
                         </div>
                     </div>
+                </div>
+            )}
+
+            {/* Google Meet-style admit popup */}
+            {admitPrompt && user.role === 'mentor' && (
+                <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-3 rounded-2xl shadow-2xl"
+                    style={{ background: '#292b2f', border: '1px solid rgba(255,255,255,0.15)', backdropFilter: 'blur(12px)', minWidth: 300 }}>
+                    <div className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold text-white shrink-0" style={{ background: '#0891b2' }}>
+                        {admitPrompt.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <p className="text-white text-[14px] font-medium truncate">{admitPrompt.name}</p>
+                        <p className="text-white/50 text-[12px]">wants to join</p>
+                    </div>
+                    <button onClick={() => denyUser(admitPrompt.socketId)}
+                        className="px-3 py-1.5 rounded-full text-[13px] text-white/70 hover:text-white transition-colors"
+                        style={{ background: 'rgba(255,255,255,0.08)' }}>
+                        Deny
+                    </button>
+                    <button onClick={() => admitUser(admitPrompt.socketId, admitPrompt.userId)}
+                        className="px-4 py-1.5 rounded-full text-[13px] text-white font-medium transition-all hover:opacity-90"
+                        style={{ background: '#1a73e8' }}>
+                        Admit
+                    </button>
                 </div>
             )}
 
