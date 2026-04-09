@@ -111,6 +111,7 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
     // ── Cleanup on unmount ────────────────────────────────────────────────
     useEffect(() => {
         return () => {
+            pcRef.current?.getSenders().forEach(s => s.track?.stop());
             localStream.current?.getTracks().forEach(t => t.stop());
             pcRef.current?.close();
         };
@@ -399,12 +400,15 @@ export default function VideoPanel({ sessionId, socket, user, peerName, peerRole
 
     // ── Cleanup ───────────────────────────────────────────────────────────
     function cleanup() {
+        // Stop all sender tracks (includes screen share)
+        pcRef.current?.getSenders().forEach(s => s.track?.stop());
         localStream.current?.getTracks().forEach(t => t.stop());
         previewStream?.getTracks().forEach(t => t.stop());
         pcRef.current?.close();
         pcRef.current = null;
         localStream.current = null;
         remoteStream.current = null;
+        setScreenShare(false);
         if (localVideoRef.current) localVideoRef.current.srcObject = null;
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
         if (previewRef.current) previewRef.current.srcObject = null;

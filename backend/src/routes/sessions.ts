@@ -63,6 +63,27 @@ router.post('/:id/end', requireRole('mentor'), async (req: AuthRequest, res: Res
     res.json(data);
 });
 
+// Delete session — both mentor and student can delete from their view
+router.delete('/:id', async (req: AuthRequest, res: Response) => {
+    const { id } = req.params;
+    const userId = req.user!.id;
+
+    // Verify user is part of this session
+    const { data: session } = await supabase
+        .from('sessions')
+        .select('mentor_id, student_id')
+        .eq('id', id)
+        .single();
+
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (session.mentor_id !== userId && session.student_id !== userId)
+        return res.status(403).json({ error: 'Not your session' });
+
+    const { error } = await supabase.from('sessions').delete().eq('id', id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+});
+
 // Get session by id (with mentor/student names via profiles)
 router.get('/:id', async (req: AuthRequest, res: Response) => {
     const { id } = req.params;

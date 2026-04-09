@@ -38,6 +38,7 @@ export default function Dashboard() {
     const [joinId, setJoinId] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const [deletingId, setDeletingId] = useState<string | null>(null);
 
     useEffect(() => {
         getUser().then(u => {
@@ -68,6 +69,18 @@ export default function Dashboard() {
         } catch (err: any) {
             setError(err.message);
         } finally { setLoading(false); }
+    }
+
+    async function deleteSession(id: string, e: React.MouseEvent) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!confirm('Delete this session? This cannot be undone.')) return;
+        try {
+            await api.deleteSession(id);
+            setSessions(prev => prev.filter(s => s.id !== id));
+        } catch (err: any) {
+            alert(err.message);
+        }
     }
 
     if (!user) return (
@@ -273,8 +286,7 @@ export default function Dashboard() {
                             {sessions.map(s => {
                                 const st = STATUS_STYLES[s.status] || STATUS_STYLES.ended;
                                 return (
-                                    <Link key={s.id} href={`/session/${s.id}`}
-                                        className="flex items-center gap-4 px-5 py-4 rounded-2xl transition-all duration-150 group"
+                                    <div key={s.id} className="flex items-center gap-4 px-5 py-4 rounded-2xl transition-all duration-150 group"
                                         style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
                                         onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--border-hover)')}
                                         onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border)')}>
@@ -283,23 +295,34 @@ export default function Dashboard() {
                                             style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--muted)' }}>
                                             {LANG_ICONS[s.language] || s.language.slice(0, 2).toUpperCase()}
                                         </div>
-                                        <div className="flex-1 min-w-0">
+                                        <Link href={`/session/${s.id}`} className="flex-1 min-w-0">
                                             <p className="font-medium text-[14px] truncate">{s.title}</p>
                                             <p className="text-[12px] text-[var(--muted)] mt-0.5 truncate">
                                                 {s.mentor_name} → {s.student_name || 'waiting for student'}
                                             </p>
-                                        </div>
-                                        <div className="flex items-center gap-3 shrink-0">
+                                        </Link>
+                                        <div className="flex items-center gap-2 shrink-0">
                                             <span className="flex items-center gap-1.5 text-[12px] px-2.5 py-1 rounded-full"
                                                 style={{ background: st.bg, color: st.text }}>
                                                 <span className="w-1.5 h-1.5 rounded-full" style={{ background: st.dot }} />
                                                 {s.status}
                                             </span>
-                                            <svg className="w-4 h-4 text-[var(--muted)] group-hover:text-white transition-colors" viewBox="0 0 16 16" fill="none">
-                                                <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                                            </svg>
+                                            <button
+                                                onClick={e => deleteSession(s.id, e)}
+                                                title="Delete session"
+                                                className="w-8 h-8 rounded-lg flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all hover:bg-red-500/15"
+                                                style={{ color: '#fca5a5' }}>
+                                                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                                    <path d="M2 3.5h10M5.5 3.5V2.5a.5.5 0 0 1 .5-.5h2a.5.5 0 0 1 .5.5v1M3 3.5l.7 7.5a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9L11 3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                                                </svg>
+                                            </button>
+                                            <Link href={`/session/${s.id}`}>
+                                                <svg className="w-4 h-4 text-[var(--muted)] group-hover:text-white transition-colors" viewBox="0 0 16 16" fill="none">
+                                                    <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                                                </svg>
+                                            </Link>
                                         </div>
-                                    </Link>
+                                    </div>
                                 );
                             })}
                         </div>

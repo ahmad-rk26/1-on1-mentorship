@@ -32,4 +32,7 @@ export const api = {
     getMySessions: () => request('/api/sessions'),
 
     getMessages: (id: string) => request(`/api/sessions/${id}/messages`),
+
+    deleteSession: (id: string) =>
+        request(`/api/sessions/${id}`, { method: 'DELETE' }),
 };
